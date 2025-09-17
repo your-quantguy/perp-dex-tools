@@ -15,7 +15,6 @@ from helpers import TradingLogger
 from helpers.lark_bot import LarkBot
 
 
-
 @dataclass
 class TradingConfig:
     """Configuration class for trading parameters."""
@@ -28,6 +27,7 @@ class TradingConfig:
     max_orders: int
     wait_time: int
     exchange: str
+    grid_step: Decimal
 
     @property
     def close_order_side(self) -> str:
@@ -171,10 +171,10 @@ class TradingBot:
         else:
             cool_down_time = self.config.wait_time / 4
 
-         # if the program detects active_close_orders during startup, it is necessary to consider cooldown_time
+        # if the program detects active_close_orders during startup, it is necessary to consider cooldown_time
         if self.last_open_order_time == 0 and len(self.active_close_orders) > 0:
             self.last_open_order_time = time.time()
-        
+
         if time.time() - self.last_open_order_time > cool_down_time:
             return 0
         else:
@@ -319,12 +319,13 @@ class TradingBot:
                 self.last_log_time = time.time()
                 # Check for position mismatch
                 if abs(position_amt - active_close_amount) > (2 * self.config.quantity):
-                    error_message = f"\n\nERROR: [{self.config.exchange.upper()}_{self.config.ticker.upper()}] Position mismatch detected\n"
-                    error_message += f"###### ERROR ###### ERROR ###### ERROR ###### ERROR #####\n"
-                    error_message += f"Please manually rebalance your position and take-profit orders\n"
-                    error_message += f"请手动平衡当前仓位和正在关闭的仓位\n"
+                    error_message = f"\n\nERROR: [{self.config.exchange.upper()}_{self.config.ticker.upper()}] "
+                    error_message += "Position mismatch detected\n"
+                    error_message += "###### ERROR ###### ERROR ###### ERROR ###### ERROR #####\n"
+                    error_message += "Please manually rebalance your position and take-profit orders\n"
+                    error_message += "请手动平衡当前仓位和正在关闭的仓位\n"
                     error_message += f"current position: {position_amt} | active closing amount: {active_close_amount}\n"
-                    error_message += f"###### ERROR ###### ERROR ###### ERROR ###### ERROR #####\n"
+                    error_message += "###### ERROR ###### ERROR ###### ERROR ###### ERROR #####\n"
                     self.logger.log(error_message, "ERROR")
 
                     lark_token = os.getenv("LARK_TOKEN")
@@ -346,6 +347,33 @@ class TradingBot:
                 self.logger.log(f"Traceback: {traceback.format_exc()}", "ERROR")
 
             print("--------------------------------")
+
+    async def _meet_grid_step_condition(self) -> bool:
+        if self.active_close_orders:
+            picker = min if self.config.direction == "buy" else max
+            next_close_order = picker(self.active_close_orders, key=lambda o: o["price"])
+            next_close_price = next_close_order["price"]
+
+            best_bid, best_ask = await self.exchange_client.fetch_bbo_prices(self.config.contract_id)
+            if best_bid <= 0 or best_ask <= 0 or best_bid >= best_ask:
+                raise ValueError("No bid/ask data available")
+
+            if self.config.direction == "buy":
+                new_order_close_price = best_ask * (1 + self.config.take_profit/100)
+                if next_close_price / new_order_close_price > 1 + self.config.grid_step/100:
+                    return True
+                else:
+                    return False
+            elif self.config.direction == "sell":
+                new_order_close_price = best_bid * (1 - self.config.take_profit/100)
+                if new_order_close_price / next_close_price > 1 + self.config.grid_step/100:
+                    return True
+                else:
+                    return False
+            else:
+                raise ValueError(f"Invalid direction: {self.config.direction}")
+        else:
+            return True
 
     async def run(self):
         """Main trading loop."""
@@ -381,6 +409,11 @@ class TradingBot:
                         await asyncio.sleep(wait_time)
                         continue
                     else:
+                        meet_grid_step_condition = await self._meet_grid_step_condition()
+                        if not meet_grid_step_condition:
+                            await asyncio.sleep(1)
+                            continue
+
                         await self._place_and_monitor_open_order()
                         self.last_close_orders += 1
 

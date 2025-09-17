@@ -142,6 +142,25 @@ class EdgeXClient(BaseExchangeClient):
         except Exception as e:
             self.logger.log(f"Could not add trade-event handler: {e}", "ERROR")
 
+    @query_retry(default_return=(0, 0))
+    async def fetch_bbo_prices(self, contract_id: str) -> Tuple[Decimal, Decimal]:
+        depth_params = GetOrderBookDepthParams(contract_id=contract_id, limit=15)
+        order_book = await self.client.quote.get_order_book_depth(depth_params)
+        order_book_data = order_book['data']
+
+        # Get the first (and should be only) order book entry
+        order_book_entry = order_book_data[0]
+
+        # Extract bids and asks from the entry
+        bids = order_book_entry.get('bids', [])
+        asks = order_book_entry.get('asks', [])
+
+        # Best bid is the highest price someone is willing to buy at
+        best_bid = Decimal(bids[0]['price']) if bids and len(bids) > 0 else 0
+        # Best ask is the lowest price someone is willing to sell at
+        best_ask = Decimal(asks[0]['price']) if asks and len(asks) > 0 else 0
+        return best_bid, best_ask
+
     async def place_open_order(self, contract_id: str, quantity: Decimal, direction: str) -> OrderResult:
         """Place an open order with EdgeX using official SDK with retry logic for POST_ONLY rejections."""
         max_retries = 15
@@ -149,33 +168,7 @@ class EdgeXClient(BaseExchangeClient):
 
         while retry_count < max_retries:
             try:
-                depth_params = GetOrderBookDepthParams(contract_id=contract_id, limit=15)
-                order_book = await self.client.quote.get_order_book_depth(depth_params)
-
-                # Handle the response format: {"code": "SUCCESS", "data": [{"asks": [...], "bids": [...]}]}
-                if not isinstance(order_book, dict) or 'data' not in order_book:
-                    return OrderResult(success=False, error_message='Unexpected order book response format')
-
-                order_book_data = order_book['data']
-                if not isinstance(order_book_data, list) or len(order_book_data) == 0:
-                    return OrderResult(success=False, error_message='Order book data is not a valid list')
-
-                # Get the first (and should be only) order book entry
-                order_book_entry = order_book_data[0]
-                if not isinstance(order_book_entry, dict):
-                    return OrderResult(success=False, error_message='Order book entry is not a dict')
-
-                # Extract bids and asks from the entry
-                bids = order_book_entry.get('bids', [])
-                asks = order_book_entry.get('asks', [])
-
-                if not bids or not asks:
-                    return OrderResult(success=False, error_message='No bid/ask data available')
-
-                # Best bid is the highest price someone is willing to buy at
-                best_bid = Decimal(bids[0]['price']) if bids and len(bids) > 0 else 0
-                # Best ask is the lowest price someone is willing to sell at
-                best_ask = Decimal(asks[0]['price']) if asks and len(asks) > 0 else 0
+                best_bid, best_ask = await self.fetch_bbo_prices(contract_id)
 
                 if best_bid <= 0 or best_ask <= 0:
                     return OrderResult(success=False, error_message='Invalid bid/ask prices')
@@ -256,28 +249,7 @@ class EdgeXClient(BaseExchangeClient):
 
         while retry_count < max_retries:
             try:
-                # Get current market prices to adjust order price if needed
-                depth_params = GetOrderBookDepthParams(contract_id=contract_id, limit=15)
-                order_book = await self.client.quote.get_order_book_depth(depth_params)
-
-                if not isinstance(order_book, dict) or 'data' not in order_book:
-                    return OrderResult(success=False, error_message='Failed to get order book')
-
-                order_book_data = order_book['data']
-                if not isinstance(order_book_data, list) or len(order_book_data) == 0:
-                    return OrderResult(success=False, error_message='Invalid order book data')
-
-                # Get the first order book entry
-                order_book_entry = order_book_data[0]
-                bids = order_book_entry.get('bids', [])
-                asks = order_book_entry.get('asks', [])
-
-                if not bids or not asks:
-                    return OrderResult(success=False, error_message='No bid/ask data available')
-
-                # Get best bid and ask prices
-                best_bid = Decimal(bids[0]['price']) if bids and len(bids) > 0 else 0
-                best_ask = Decimal(asks[0]['price']) if asks and len(asks) > 0 else 0
+                best_bid, best_ask = await self.fetch_bbo_prices(contract_id)
 
                 if best_bid <= 0 or best_ask <= 0:
                     return OrderResult(success=False, error_message='Invalid bid/ask prices')

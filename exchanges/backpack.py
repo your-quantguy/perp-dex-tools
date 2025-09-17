@@ -283,6 +283,26 @@ class BackpackClient(BaseExchangeClient):
         except Exception as e:
             self.logger.log(f"Error handling WebSocket order update: {e}", "ERROR")
 
+    @query_retry(default_return=(0, 0))
+    async def fetch_bbo_prices(self, contract_id: str) -> Tuple[Decimal, Decimal]:
+        # Get order book depth from Backpack
+        order_book = self.public_client.get_depth(contract_id)
+
+        # Extract bids and asks directly from Backpack response
+        bids = order_book.get('bids', [])
+        asks = order_book.get('asks', [])
+
+        # Sort bids and asks
+        bids = sorted(bids, key=lambda x: Decimal(x[0]), reverse=True)  # (highest price first)
+        asks = sorted(asks, key=lambda x: Decimal(x[0]))                # (lowest price first)
+
+        # Best bid is the highest price someone is willing to buy at
+        best_bid = Decimal(bids[0][0]) if bids and len(bids) > 0 else 0
+        # Best ask is the lowest price someone is willing to sell at
+        best_ask = Decimal(asks[0][0]) if asks and len(asks) > 0 else 0
+
+        return best_bid, best_ask
+
     async def place_open_order(self, contract_id: str, quantity: Decimal, direction: str) -> OrderResult:
         """Place an open order with Backpack using official SDK with retry logic for POST_ONLY rejections."""
         max_retries = 15
@@ -290,28 +310,8 @@ class BackpackClient(BaseExchangeClient):
 
         while retry_count < max_retries:
             retry_count += 1
-            # Get order book depth from Backpack
-            order_book = self.public_client.get_depth(contract_id)
 
-            # Handle Backpack order book response format
-            if not isinstance(order_book, dict):
-                return OrderResult(success=False, error_message='Unexpected order book response format')
-
-            # Extract bids and asks directly from Backpack response
-            bids = order_book.get('bids', [])
-            asks = order_book.get('asks', [])
-
-            if not bids or not asks:
-                return OrderResult(success=False, error_message='No bid/ask data available')
-            
-            # Sort bids and asks
-            bids = sorted(bids, key=lambda x: Decimal(x[0]), reverse=True)  # (highest price first)
-            asks = sorted(asks, key=lambda x: Decimal(x[0]))                # (lowest price first)
-
-            # Best bid is the highest price someone is willing to buy at
-            best_bid = Decimal(bids[0][0]) if bids and len(bids) > 0 else 0
-            # Best ask is the lowest price someone is willing to sell at
-            best_ask = Decimal(asks[0][0]) if asks and len(asks) > 0 else 0
+            best_bid, best_ask = await self.fetch_bbo_prices(contract_id)
 
             if best_bid <= 0 or best_ask <= 0:
                 return OrderResult(success=False, error_message='Invalid bid/ask prices')
@@ -370,28 +370,10 @@ class BackpackClient(BaseExchangeClient):
         while retry_count < max_retries:
             retry_count += 1
             # Get current market prices to adjust order price if needed
-            order_book = self.public_client.get_depth(contract_id)
-
-            if not isinstance(order_book, dict):
-                return OrderResult(success=False, error_message='Failed to get order book')
-
-            # Extract bids and asks directly from Backpack response
-            bids = order_book.get('bids', [])
-            asks = order_book.get('asks', [])
-
-            if not bids or not asks:
-                return OrderResult(success=False, error_message='No bid/ask data available')
-
-            # Sort bids and asks
-            bids = sorted(bids, key=lambda x: Decimal(x[0]), reverse=True)  # (highest price first)
-            asks = sorted(asks, key=lambda x: Decimal(x[0]))                # (lowest price first)
-
-            # Get best bid and ask prices
-            best_bid = Decimal(bids[0][0]) if bids and len(bids) > 0 else 0
-            best_ask = Decimal(asks[0][0]) if asks and len(asks) > 0 else 0
+            best_bid, best_ask = await self.fetch_bbo_prices(contract_id)
 
             if best_bid <= 0 or best_ask <= 0:
-                return OrderResult(success=False, error_message='Invalid bid/ask prices')
+                return OrderResult(success=False, error_message='No bid/ask data available')
 
             # Adjust order price based on market conditions and side
             adjusted_price = price

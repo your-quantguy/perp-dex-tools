@@ -36,8 +36,10 @@ def parse_arguments():
                         help='Maximum number of active orders (default: 40)')
     parser.add_argument('--wait-time', type=int, default=450,
                         help='Wait time between orders in seconds (default: 450)')
-    parser.add_argument( "--env-file",type=str, default=".env",
+    parser.add_argument('--env-file', type=str, default=".env",
                         help=".env file path (default: .env)")
+    parser.add_argument('--grid-step', type=str, default='-100',
+                        help="The minimum distance in percentage to the next close order price (default: -100)")
 
     return parser.parse_args()
 
@@ -61,7 +63,8 @@ async def main():
         direction=args.direction,
         max_orders=args.max_orders,
         wait_time=args.wait_time,
-        exchange=args.exchange
+        exchange=args.exchange,
+        grid_step=Decimal(args.grid_step)
     )
 
     # Create and run the bot
