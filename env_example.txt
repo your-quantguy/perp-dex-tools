@@ -22,6 +22,11 @@ EDGEX_WS_URL=wss://quote.edgex.exchange
 BACKPACK_PUBLIC_KEY=your_public_key_here
 BACKPACK_SECRET_KEY=your_secret_key_here
 
+# Paradex Configuration
+PARADEX_L2_ADDRESS=your_generated_l2_address_here
+PARADEX_L2_PRIVATE_KEY=your_generated_l2_private_key_here
+PARADEX_ENVIRONMENT=prod # or testnet 
+
 # Logging
 LOG_TO_CONSOLE=true
 LOG_TO_FILE=true
