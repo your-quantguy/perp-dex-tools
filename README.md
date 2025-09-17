@@ -2,6 +2,10 @@
 
 一个支持多个交易所（目前包括 EdgeX 和 Backpack）的模块化交易机器人。该机器人实现了自动下单并在盈利时自动平仓的策略。
 
+## 关注我
+
+- **X (Twitter)**: [@yourQuantGuy](https://x.com/yourQuantGuy)
+
 ## 邀请链接
 
 ### EdgeX 交易所
@@ -59,6 +63,12 @@ ETH：
 python runbot.py --exchange edgex --ticker ETH --quantity 0.1 --take-profit 0.02 --max-orders 40 --wait-time 450
 ```
 
+ETH（带网格步长控制）：
+
+```bash
+python runbot.py --exchange edgex --ticker ETH --quantity 0.1 --take-profit 0.02 --max-orders 40 --wait-time 450 --grid-step 0.5
+```
+
 BTC：
 
 ```bash
@@ -71,6 +81,12 @@ ETH 永续合约：
 
 ```bash
 python runbot.py --exchange backpack --ticker ETH --quantity 0.1 --take-profit 0.02 --max-orders 40 --wait-time 450
+```
+
+ETH 永续合约（带网格步长控制）：
+
+```bash
+python runbot.py --exchange backpack --ticker ETH --quantity 0.1 --take-profit 0.02 --max-orders 40 --wait-time 450 --grid-step 0.3
 ```
 
 ## 配置
@@ -98,6 +114,31 @@ python runbot.py --exchange backpack --ticker ETH --quantity 0.1 --take-profit 0
 - `--direction`: 交易方向：'buy'或'sell'（默认：buy）
 - `--max-orders`: 最大活跃订单数（默认：40）
 - `--wait-time`: 订单间等待时间（秒）（默认：450）
+- `--grid-step`: 与下一个平仓订单价格的最小距离百分比（默认：-100，表示无限制）
+
+## 交易策略
+
+该机器人实现了简单的剥头皮策略：
+
+1. **订单下单**：在市场价格附近下限价单
+2. **订单监控**：等待订单成交
+3. **平仓订单**：在止盈水平自动下平仓单
+4. **持仓管理**：监控持仓和活跃订单
+5. **风险管理**：限制最大并发订单数
+6. **网格步长控制**：通过 `--grid-step` 参数控制新订单与现有平仓订单之间的最小价格距离
+
+### 网格步长功能
+
+`--grid-step` 参数用于控制新订单的平仓价格与现有平仓订单之间的最小距离：
+
+- **默认值 -100**：无网格步长限制，按原策略执行
+- **正值（如 0.5）**：新订单的平仓价格必须与最近的平仓订单价格保持至少 0.5% 的距离
+- **作用**：防止平仓订单过于密集，提高成交概率和风险管理
+
+例如，当看多且 `--grid-step 0.5` 时：
+- 如果现有平仓订单价格为 2000 USDT
+- 新订单的平仓价格必须低于 1990 USDT（2000 × (1 - 0.5%)）
+- 这样可以避免平仓订单过于接近，提高整体策略效果
 
 ## 架构
 
@@ -142,16 +183,6 @@ python runbot.py --exchange backpack --ticker ETH --quantity 0.1 --take-profit 0
 - 持仓管理
 - 主交易循环
 - 多交易所支持
-
-## 交易策略
-
-该机器人实现了简单的剥头皮策略：
-
-1. **订单下单**：在市场价格附近下限价单
-2. **订单监控**：等待订单成交
-3. **平仓订单**：在止盈水平自动下平仓单
-4. **持仓管理**：监控持仓和活跃订单
-5. **风险管理**：限制最大并发订单数
 
 ## 日志记录
 

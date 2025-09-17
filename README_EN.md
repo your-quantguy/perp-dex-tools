@@ -2,6 +2,10 @@
 
 A modular trading bot that supports multiple exchanges including EdgeX and Backpack. The bot implements an automated strategy that places orders and automatically closes them at a profit.
 
+## Follow Me
+
+- **X (Twitter)**: [@yourQuantGuy](https://x.com/yourQuantGuy)
+
 ## Referral Links
 
 ### EdgeX Exchange
@@ -59,6 +63,12 @@ ETH:
 python runbot.py --exchange edgex --ticker ETH --quantity 0.1 --take-profit 0.02 --max-orders 40 --wait-time 450
 ```
 
+ETH (with grid step control):
+
+```bash
+python runbot.py --exchange edgex --ticker ETH --quantity 0.1 --take-profit 0.02 --max-orders 40 --wait-time 450 --grid-step 0.5
+```
+
 BTC:
 
 ```bash
@@ -71,6 +81,12 @@ ETH Perpetual:
 
 ```bash
 python runbot.py --exchange backpack --ticker ETH --quantity 0.1 --take-profit 0.02 --max-orders 40 --wait-time 450
+```
+
+ETH Perpetual (with grid step control):
+
+```bash
+python runbot.py --exchange backpack --ticker ETH --quantity 0.1 --take-profit 0.02 --max-orders 40 --wait-time 450 --grid-step 0.3
 ```
 
 ## Configuration
@@ -98,6 +114,31 @@ python runbot.py --exchange backpack --ticker ETH --quantity 0.1 --take-profit 0
 - `--direction`: Trading direction: 'buy' or 'sell' (default: buy)
 - `--max-orders`: Maximum number of active orders (default: 40)
 - `--wait-time`: Wait time between orders in seconds (default: 450)
+- `--grid-step`: Minimum distance in percentage to the next close order price (default: -100, means no restriction)
+
+## Trading Strategy
+
+The bot implements a simple scalping strategy:
+
+1. **Order Placement**: Places a limit order slightly above/below market price
+2. **Order Monitoring**: Waits for the order to be filled
+3. **Close Order**: Automatically places a close order at the take profit level
+4. **Position Management**: Monitors positions and active orders
+5. **Risk Management**: Limits maximum number of concurrent orders
+6. **Grid Step Control**: Controls minimum price distance between new orders and existing close orders via `--grid-step` parameter
+
+### Grid Step Feature
+
+The `--grid-step` parameter controls the minimum distance between new order close prices and existing close order prices:
+
+- **Default -100**: No grid step restriction, executes original strategy
+- **Positive value (e.g., 0.5)**: New order close price must maintain at least 0.5% distance from the nearest close order price
+- **Purpose**: Prevents close orders from being too dense, improving fill probability and risk management
+
+For example, when Long and `--grid-step 0.5`:
+- If existing close order price is 2000 USDT
+- New order close price must be lower than 1990 USDT (2000 × (1 - 0.5%))
+- This prevents close orders from being too close together, improving overall strategy effectiveness
 
 ## Architecture
 
@@ -142,16 +183,6 @@ The bot is built with a modular architecture supporting multiple exchanges:
 - Position management
 - Main trading loop
 - Multi-exchange support
-
-## Trading Strategy
-
-The bot implements a simple scalping strategy:
-
-1. **Order Placement**: Places a limit order slightly above/below market price
-2. **Order Monitoring**: Waits for the order to be filled
-3. **Close Order**: Automatically places a close order at the take profit level
-4. **Position Management**: Monitors positions and active orders
-5. **Risk Management**: Limits maximum number of concurrent orders
 
 ## Logging
 
