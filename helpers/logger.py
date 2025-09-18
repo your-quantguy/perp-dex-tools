@@ -21,9 +21,17 @@ class TradingLogger:
         logs_dir = os.path.join(project_root, 'logs')
         os.makedirs(logs_dir, exist_ok=True)
 
+        order_file_name = f"{exchange}_{ticker}_orders.csv"
+        debug_log_file_name = f"{exchange}_{ticker}_activity.log"
+
+        account_id = os.getenv('ACCOUNT_ID')
+        if account_id:
+            order_file_name = f"{exchange}_{ticker}_{account_id}_orders.csv"
+            debug_log_file_name = f"{exchange}_{ticker}_{account_id}_activity.log"
+
         # Log file paths inside logs directory
-        self.log_file = os.path.join(logs_dir, f"{exchange}_{ticker}_orders.csv")
-        self.debug_log_file = os.path.join(logs_dir, f"{exchange}_{ticker}_activity.log")
+        self.log_file = os.path.join(logs_dir, order_file_name)
+        self.debug_log_file = os.path.join(logs_dir, debug_log_file_name)
         self.timezone = pytz.timezone(os.getenv('TIMEZONE', 'Asia/Shanghai'))
         self.logger = self._setup_logger(log_to_console)
 
