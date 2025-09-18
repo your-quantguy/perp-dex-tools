@@ -39,6 +39,12 @@
    pip install -r requirements.txt
    ```
 
+   **Paradex 用户**：如果您想使用 Paradex 交易所，需要额外安装 Paradex 专用依赖：
+
+   ```bash
+   pip install -r para_requirements.txt
+   ```
+
 4. **设置环境变量**：
    使用 env_example.txt 在项目根目录创建`.env`文件。
 

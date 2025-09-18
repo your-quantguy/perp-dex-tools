@@ -36,6 +36,12 @@ You will get 10% taker fee discount rebates and potential future benefits
    pip install -r requirements.txt
    ```
 
+   **Paradex Users**: If you want to use Paradex exchange, you need to install additional Paradex-specific dependencies:
+
+   ```bash
+   pip install -r para_requirements.txt
+   ```
+
 4. **Set up environment variables**:
    Use the env_example.txt to create a `.env` file in the project root.
 
