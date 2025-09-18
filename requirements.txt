@@ -7,7 +7,6 @@ pydantic>=1.8.0
 pycryptodome>=3.15.0
 ecdsa>=0.17.0
 requests==2.32.5
-tenacity==9.1.2
 
 # Backpack Trading Bot Dependencies
 websockets>=12.0
