@@ -30,7 +30,7 @@ def parse_arguments():
                         help='Order quantity (default: 0.1)')
     parser.add_argument('--take-profit', type=Decimal, default=Decimal(0.02),
                         help='Take profit in USDT (default: 0.02)')
-    parser.add_argument('--direction', type=str, default='buy',
+    parser.add_argument('--direction', type=str, default='buy', choices=['buy', 'sell'],
                         help='Direction of the bot (default: buy)')
     parser.add_argument('--max-orders', type=int, default=40,
                         help='Maximum number of active orders (default: 40)')

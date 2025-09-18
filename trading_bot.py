@@ -113,6 +113,7 @@ class TradingBot:
 
                 if status == 'FILLED':
                     if order_type == "OPEN":
+                        self.order_filled_amount = filled_size
                         # Ensure thread-safe interaction with asyncio event loop
                         if self.loop is not None:
                             self.loop.call_soon_threadsafe(self.order_filled_event.set)
@@ -247,11 +248,13 @@ class TradingBot:
             try:
                 cancel_result = await self.exchange_client.cancel_order(order_id)
                 if not cancel_result.success:
+                    self.order_canceled_event.set()
                     self.logger.log(f"[CLOSE] Failed to cancel order {order_id}: {cancel_result.error_message}", "ERROR")
                 else:
                     self.current_order_status = "CANCELED"
 
             except Exception as e:
+                self.order_canceled_event.set()
                 self.logger.log(f"[CLOSE] Error canceling order {order_id}: {e}", "ERROR")
 
             if self.config.exchange == "backpack":

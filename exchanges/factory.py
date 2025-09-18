@@ -6,7 +6,7 @@ from typing import Dict, Any
 from .base import BaseExchangeClient
 from .edgex import EdgeXClient
 from .backpack import BackpackClient
-from .paradex_simple import ParadexClient
+from .paradex import ParadexClient
 
 
 class ExchangeFactory:
