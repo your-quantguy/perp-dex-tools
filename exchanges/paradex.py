@@ -69,7 +69,7 @@ class ParadexClient(BaseExchangeClient):
         self.l1_address = os.getenv('PARADEX_L1_ADDRESS')
         self.l2_private_key_hex = os.getenv('PARADEX_L2_PRIVATE_KEY')
         self.l2_address = os.getenv('PARADEX_L2_ADDRESS')
-        self.environment = os.getenv('PARADEX_ENVIRONMENT', 'testnet')
+        self.environment = os.getenv('PARADEX_ENVIRONMENT', 'prod')
 
         # Validate that required credentials are provided
         if not self.l1_address:
