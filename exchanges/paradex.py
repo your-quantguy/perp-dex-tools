@@ -312,6 +312,9 @@ class ParadexClient(BaseExchangeClient):
         order_id = order_result.get('id')
         order_status = order_result.get('status')
         order_status_start_time = time.time()
+        order_info = await self.get_order_info(order_id)
+        if order_info is not None:
+            order_status = order_info.status
         while order_status in ['NEW'] and time.time() - order_status_start_time < 10:
             # Check order status after a short delay
             await asyncio.sleep(0.01)
@@ -480,7 +483,8 @@ class ParadexClient(BaseExchangeClient):
                 price=Decimal(order_data.get('price', 0)),
                 status=order_data.get('status', ''),
                 filled_size=Decimal(order_data.get('filled_size', 0)),
-                remaining_size=Decimal(order_data.get('remaining_size', 0))
+                remaining_size=Decimal(order_data.get('remaining_size', 0)),
+                cancel_reason=order_data.get('cancel_reason', '')
             )
 
         except Exception as e:
