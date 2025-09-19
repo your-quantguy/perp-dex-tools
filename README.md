@@ -104,6 +104,12 @@ ETH（带网格步长控制）：
 python runbot.py --exchange edgex --ticker ETH --quantity 0.1 --take-profit 0.02 --max-orders 40 --wait-time 450 --grid-step 0.5
 ```
 
+ETH（带停止交易的价格控制）：
+
+```bash
+python runbot.py --exchange edgex --ticker ETH --quantity 0.1 --take-profit 0.02 --max-orders 40 --wait-time 450 --stop-price 5500
+```
+
 BTC：
 
 ```bash
@@ -127,6 +133,9 @@ python runbot.py --exchange backpack --ticker ETH --quantity 0.1 --take-profit 0
 ## 配置
 
 ### 环境变量
+
+#### 通用配置
+- `ACCOUNT_NAME`: 环境变量中当前账号的名称，用于多账号日志区分，可自定义，非必须
 
 #### EdgeX 配置
 
@@ -155,6 +164,7 @@ python runbot.py --exchange backpack --ticker ETH --quantity 0.1 --take-profit 0
 - `--max-orders`: 最大活跃订单数（默认：40）
 - `--wait-time`: 订单间等待时间（秒）（默认：450）
 - `--grid-step`: 与下一个平仓订单价格的最小距离百分比（默认：-100，表示无限制）
+- `--stop-price`: 当 `direction` 是 'buy' 时，price >= stop-price 停止交易并退出程序；'sell' 逻辑相反（默认：-1，表示不会因为价格原因停止交易）
 
 ## 交易策略
 
@@ -169,6 +179,7 @@ python runbot.py --exchange backpack --ticker ETH --quantity 0.1 --take-profit 0
 4. **持仓管理**：监控持仓和活跃订单
 5. **风险管理**：限制最大并发订单数
 6. **网格步长控制**：通过 `--grid-step` 参数控制新订单与现有平仓订单之间的最小价格距离
+7. **停止交易控制**：通过 `--stop-price` 参数控制停止交易的的价格条件
 
 ### 网格步长功能
 

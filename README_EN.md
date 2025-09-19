@@ -101,6 +101,13 @@ ETH (with grid step control):
 python runbot.py --exchange edgex --ticker ETH --quantity 0.1 --take-profit 0.02 --max-orders 40 --wait-time 450 --grid-step 0.5
 ```
 
+
+ETH（with stop price control）：
+
+```bash
+python runbot.py --exchange edgex --ticker ETH --quantity 0.1 --take-profit 0.02 --max-orders 40 --wait-time 450 --stop-price 5500
+```
+
 BTC:
 
 ```bash
@@ -124,6 +131,9 @@ python runbot.py --exchange backpack --ticker ETH --quantity 0.1 --take-profit 0
 ## Configuration
 
 ### Environment Variables
+
+#### General Configuration
+- `ACCOUNT_NAME`: The name of the current account in the environment variable, used for distinguishing between multiple account logs, customizable, not mandatory
 
 #### EdgeX Configuration
 
@@ -152,6 +162,7 @@ python runbot.py --exchange backpack --ticker ETH --quantity 0.1 --take-profit 0
 - `--max-orders`: Maximum number of active orders (default: 40)
 - `--wait-time`: Wait time between orders in seconds (default: 450)
 - `--grid-step`: Minimum distance in percentage to the next close order price (default: -100, means no restriction)
+- `--stop-price`: For BUY direction: exit when price >= stop-price. For SELL direction: exit when price <= stop-price. (Default: -1, no price-based termination)
 
 ## Trading Strategy
 
@@ -166,6 +177,7 @@ The bot implements a simple strategy:
 4. **Position Management**: Monitors positions and active orders
 5. **Risk Management**: Limits maximum number of concurrent orders
 6. **Grid Step Control**: Controls minimum price distance between new orders and existing close orders via `--grid-step` parameter
+7. **Stop Trading Control**：Control the price conditions for stopping transactions through the `--stop price` parameter
 
 ### Grid Step Feature
 

@@ -2,6 +2,7 @@
 Modular Trading Bot - Supports multiple exchanges
 """
 
+from ast import Tuple
 import os
 import time
 import asyncio
@@ -28,6 +29,7 @@ class TradingConfig:
     wait_time: int
     exchange: str
     grid_step: Decimal
+    stop_price: Decimal
 
     @property
     def close_order_side(self) -> str:
@@ -318,7 +320,7 @@ class TradingBot:
                     if isinstance(order, dict)
                 )
 
-                self.logger.log(f"Current Position: {position_amt} | Active closing amount: {active_close_amount}")
+                self.logger.log(f"Current Position: {position_amt} | Active closing amount: {active_close_amount}, quantity: {len(self.active_close_orders)}")
                 self.last_log_time = time.time()
                 # Check for position mismatch
                 if abs(position_amt - active_close_amount) > (2 * self.config.quantity):
@@ -327,14 +329,11 @@ class TradingBot:
                     error_message += "###### ERROR ###### ERROR ###### ERROR ###### ERROR #####\n"
                     error_message += "Please manually rebalance your position and take-profit orders\n"
                     error_message += "请手动平衡当前仓位和正在关闭的仓位\n"
-                    error_message += f"current position: {position_amt} | active closing amount: {active_close_amount}\n"
+                    error_message += f"current position: {position_amt} | active closing amount: {active_close_amount}, quantity: {len(self.active_close_orders)}\n"
                     error_message += "###### ERROR ###### ERROR ###### ERROR ###### ERROR #####\n"
                     self.logger.log(error_message, "ERROR")
 
-                    lark_token = os.getenv("LARK_TOKEN")
-                    if lark_token:
-                        async with LarkBot(lark_token) as bot:
-                            await bot.send_text(error_message.lstrip())
+                    await self._lark_bot_notify(error_message.lstrip())
 
                     if not self.shutdown_requested:
                         self.shutdown_requested = True
@@ -378,6 +377,31 @@ class TradingBot:
         else:
             return True
 
+    async def _meet_stop_price_condition(self) -> bool:
+        if self.config.stop_price == -1:
+            return False
+        
+        best_bid, best_ask = await self.exchange_client.fetch_bbo_prices(self.config.contract_id)
+        if best_bid <= 0 or best_ask <= 0 or best_bid >= best_ask:
+                raise ValueError("No bid/ask data available")
+        
+        if self.config.direction == "buy":
+            if best_ask >= self.config.stop_price:
+                return True
+        elif self.config.direction == "sell":
+            if best_bid <= self.config.stop_price:
+                return True
+        else:
+            raise ValueError(f"Invalid direction: {self.config.direction}")
+        
+        return False
+
+    async def _lark_bot_notify(self, message: str):
+        lark_token = os.getenv("LARK_TOKEN")
+        if lark_token:
+            async with LarkBot(lark_token) as bot:
+                await bot.send_text(message)
+
     async def run(self):
         """Main trading loop."""
         try:
@@ -405,6 +429,15 @@ class TradingBot:
 
                 # Periodic logging
                 mismatch_detected = await self._log_status_periodically()
+                
+                meet_stop_price_condition = await self._meet_stop_price_condition()
+                if meet_stop_price_condition:
+                    msg = f"\n\nWARNING: [{self.config.exchange.upper()}_{self.config.ticker.upper()}] \n"
+                    msg += f"Stopped trading due to stop price\n"
+                    await self.graceful_shutdown(msg)
+                    await self._lark_bot_notify(msg.lstrip())
+                    continue
+
                 if not mismatch_detected:
                     wait_time = self._calculate_wait_time()
 

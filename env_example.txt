@@ -1,3 +1,6 @@
+# EdgeX Configuration
+# Get these from your EdgeX account settings
+
 # EdgeX Account Credentials (REQUIRED for API access)
 # Find these in your EdgeX account under "API Management"
 EDGEX_ACCOUNT_ID=your_account_id_here
@@ -28,3 +31,7 @@ TIMEZONE=Asia/Shanghai
 # EdgeX API Endpoints
 EDGEX_BASE_URL=https://pro.edgex.exchange
 EDGEX_WS_URL=wss://quote.edgex.exchange
+
+# Customizable
+# used to distinguish log files for multiple accounts, optional
+ACCOUNT_NAME=
