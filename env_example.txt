@@ -1,26 +1,22 @@
-# EdgeX Configuration
-# Get these from your EdgeX account settings
-
 # EdgeX Account Credentials (REQUIRED for API access)
-# Find these in your EdgeX account under "API Keys" or "Account Settings"
+# Find these in your EdgeX account under "API Management"
 EDGEX_ACCOUNT_ID=your_account_id_here
 EDGEX_STARK_PRIVATE_KEY=your_stark_private_key_here
 
-# EdgeX API Endpoints
-EDGEX_BASE_URL=https://pro.edgex.exchange
-EDGEX_WS_URL=wss://quote.edgex.exchange
-
-# For testnet, use:
-# EDGEX_BASE_URL=https://testnet.edgex.exchange
-# EDGEX_WS_URL=wss://quote-testnet.edgex.exchange
-
-# Backpack Configuration
-# Get these from your Backpack account settings
-
 # Backpack Account Credentials (REQUIRED for API access)
-# Find these in your Backpack account under "API Keys" or "Account Settings"
-BACKPACK_PUBLIC_KEY=your_public_key_here
-BACKPACK_SECRET_KEY=your_secret_key_here
+# Find these in your Backpack account under "Portfolio" -> "Settings" -> "API Keys"
+BACKPACK_PUBLIC_KEY=your_api_key
+BACKPACK_SECRET_KEY=your_api_secret
+
+# Paradex Configuration 
+# user icon -> "Wallet" -> "Ethereum Address" and "Copy Paradex Private key"
+PARADEX_L2_ADDRESS=your_generated_l2_address_here
+PARADEX_L2_PRIVATE_KEY=your_generated_l2_private_key_here
+PARADEX_ENVIRONMENT=prod # or testnet 
+
+# Notification
+# guide: https://www.feishu.cn/hc/zh-CN/articles/185289387886-%E6%B6%88%E6%81%AF%E5%8A%A9%E6%89%8B-%E6%9C%BA%E5%99%A8%E4%BA%BA
+LARK_TOKEN=
 
 # Logging
 LOG_TO_CONSOLE=true
@@ -29,6 +25,6 @@ LOG_FILE=trading_log.csv
 
 TIMEZONE=Asia/Shanghai
 
-# Notification
-# guide: https://www.feishu.cn/hc/zh-CN/articles/185289387886-%E6%B6%88%E6%81%AF%E5%8A%A9%E6%89%8B-%E6%9C%BA%E5%99%A8%E4%BA%BA
-LARK_TOKEN=
+# EdgeX API Endpoints
+EDGEX_BASE_URL=https://pro.edgex.exchange
+EDGEX_WS_URL=wss://quote.edgex.exchange

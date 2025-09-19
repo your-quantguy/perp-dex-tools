@@ -1,20 +1,18 @@
-# Multi-Exchange Trading Bot
+##### Follow Me - **X (Twitter)**: [@yourQuantGuy](https://x.com/yourQuantGuy)
+## Multi-Exchange Trading Bot
 
 A modular trading bot that supports multiple exchanges including EdgeX and Backpack. The bot implements an automated strategy that places orders and automatically closes them at a profit.
 
-## Follow Me
-
-- **X (Twitter)**: [@yourQuantGuy](https://x.com/yourQuantGuy)
-
 ## Referral Links (Enjoy fee rebates and benefits)
 
-### EdgeX: [https://pro.edgex.exchange/referral/QUANT](https://pro.edgex.exchange/referral/QUANT)
-- Instant VIP 1 Trading Fees
-- 10% Fee Rebate
-- 10% Bonus Points
+#### EdgeX: [https://pro.edgex.exchange/referral/QUANT](https://pro.edgex.exchange/referral/QUANT)
+Instant VIP 1 Trading Fees; 10% Fee Rebate; 10% Bonus Points
 
-### Backpack Exchange: [https://backpack.exchange/join/quant](https://backpack.exchange/join/quant)
-By using my Backpack referral, you will get 30% fee rebates on all your trading fees
+#### Backpack Exchange: [https://backpack.exchange/join/quant](https://backpack.exchange/join/quant)
+You will get 30% fee rebates on all your trading fees
+
+#### Paradex Exchange: [https://app.paradex.trade/r/quant](https://app.paradex.trade/r/quant)
+You will get 10% taker fee discount rebates and potential future benefits
 
 ## Installation
 
@@ -38,8 +36,54 @@ By using my Backpack referral, you will get 30% fee rebates on all your trading 
    pip install -r requirements.txt
    ```
 
+   **Paradex Users**: If you want to use Paradex exchange, you need to install additional Paradex-specific dependencies:
+
+   ```bash
+   pip install -r para_requirements.txt
+   ```
+
 4. **Set up environment variables**:
    Use the env_example.txt to create a `.env` file in the project root.
+
+## Strategy Overview
+
+### How the Bot Works
+
+This trading bot specifically designed for perpetual contracts. Here's a detailed explanation of the strategy:
+
+#### 🎯 Core Strategy
+1. **Auto Order Placement**: The bot automatically places limit orders near the current market price
+2. **Wait for Fill**: Monitors order status and waits for orders to be filled by the market
+3. **Auto Close**: Once filled, immediately places a close order at the preset take-profit price
+4. **Loop Execution**: Repeats the process continuously for ongoing trading
+
+#### 📊 Trading Flow Example
+Assuming current ETH price is $2000 with take-profit set to 0.02%:
+
+1. **Open Position**: Places buy order at $2000.40 (slightly above market price)
+2. **Fill**: Order gets filled by the market, acquiring long position
+3. **Close Position**: Immediately places sell order at $2000.80 (take-profit price)
+4. **Complete**: Close order gets filled, earning 0.02% profit
+5. **Repeat**: Continues to the next trading cycle
+
+#### ⚙️ Key Parameters
+- **quantity**: Trading amount per order
+- **take-profit**: Take-profit percentage (e.g., 0.02 means 0.02%)
+- **max-orders**: Maximum concurrent active orders (risk control)
+- **wait-time**: Wait time between orders (prevents overtrading)
+- **grid-step**: Grid step control (prevents close orders from being too dense)
+
+#### 🛡️ Risk Management
+- **Order Limits**: Limits maximum concurrent orders via `max-orders`
+- **Grid Control**: Ensures reasonable spacing between close orders via `grid-step`
+- **Timeout Handling**: Automatically cancels orders that remain unfilled too long
+- **Real-time Monitoring**: Continuously monitors positions and order status
+- **⚠️ No Stop Loss**: This strategy does not include stop-loss functionality and may face significant losses in adverse market conditions
+
+#### 💡 Best Use Cases
+- **Sideways Markets**: Profiting from price oscillations within a range
+- **Low Volatility**: Accumulating volumes and profits through frequent small trades
+- **Automated Trading**: 24/7 trading without manual intervention
 
 ## Sample commands:
 
@@ -90,12 +134,17 @@ python runbot.py --exchange backpack --ticker ETH --quantity 0.1 --take-profit 0
 
 #### Backpack Configuration
 
-- `BACKPACK_PUBLIC_KEY`: Your Backpack public key
-- `BACKPACK_SECRET_KEY`: Your Backpack secret key (base64 encoded)
+- `BACKPACK_PUBLIC_KEY`: Your Backpack API key
+- `BACKPACK_SECRET_KEY`: Your Backpack API Secret
+
+#### Paradex Configuration
+
+- `PARADEX_L1_ADDRESS`: Your L1 wallet address
+- `PARADEX_L2_PRIVATE_KEY`: Your Paradex L2 private key
 
 ### Command Line Arguments
 
-- `--exchange`: Exchange to use: 'edgex' or 'backpack' (default: edgex)
+- `--exchange`: Exchange to use: 'edgex', 'backpack', or 'paradex' (default: edgex)
 - `--ticker`: Base asset symbol (e.g., ETH, BTC, SOL). Contract ID is auto-resolved.
 - `--quantity`: Order quantity (default: 0.1)
 - `--take-profit`: Take profit percent (e.g., 0.02 means 0.02%)
@@ -106,7 +155,10 @@ python runbot.py --exchange backpack --ticker ETH --quantity 0.1 --take-profit 0
 
 ## Trading Strategy
 
-The bot implements a simple scalping strategy:
+**Important Notice**: Everyone must first understand the logic and risks of this script so you can set parameters that are more suitable for yourself, or you might think this is not a good strategy and don't want to use it at all. As I mentioned on Twitter, I didn't write these scripts for sharing purposes, but because I'm actually using this script myself, so I wrote it, and then shared it.
+This script mainly focuses on long-term wear and tear. As long as the script continues to place orders, if the price reaches your highest trapped point after a month, then all your trading volume for that month will be zero-wear. Therefore, I believe that setting `--quantity` and `--wait-time` too small is not a good long-term strategy, but it is indeed suitable for short-term high-intensity volume trading. I usually use quantity between 40-60 and wait-time between 450-650 to ensure that even if the market goes against your judgment, the script can still place orders continuously and stably until the price returns to your entry point, achieving zero-wear volume trading.
+
+The bot implements a simple strategy:
 
 1. **Order Placement**: Places a limit order slightly above/below market price
 2. **Order Monitoring**: Waits for the order to be filled
@@ -128,50 +180,6 @@ For example, when Long and `--grid-step 0.5`:
 - New order close price must be lower than 1990 USDT (2000 × (1 - 0.5%))
 - This prevents close orders from being too close together, improving overall strategy effectiveness
 
-## Architecture
-
-The bot is built with a modular architecture supporting multiple exchanges:
-
-### 1. Exchange Clients
-
-#### EdgeX Client (Official SDK)
-
-- REST API client for EdgeX using the official SDK
-- Handles authentication and API requests
-- Manages order placement, cancellation, and status queries
-- Position and account information retrieval
-
-#### Backpack Client (Official SDK)
-
-- REST API client for Backpack using the official BPX SDK
-- Handles authentication and API requests
-- Manages order placement, cancellation, and status queries
-- Position and account information retrieval
-
-### 2. WebSocket Managers
-
-#### EdgeX WebSocket Manager (Official SDK)
-
-- WebSocket connection management using the official SDK
-- Real-time market data streaming
-- Order update notifications
-- Automatic connection handling
-
-#### Backpack WebSocket Manager
-
-- WebSocket connection management for Backpack
-- Real-time order update notifications
-- ED25519 signature authentication
-- Automatic connection handling
-
-### 3. Main Trading Bot (`runbot.py`)
-
-- Core scalping logic
-- Order placement and monitoring
-- Position management
-- Main trading loop
-- Multi-exchange support
-
 ## Logging
 
 The bot provides comprehensive logging:
@@ -180,13 +188,6 @@ The bot provides comprehensive logging:
 - **Debug Logs**: Detailed activity logs with timestamps
 - **Console Output**: Real-time status updates
 - **Error Handling**: Comprehensive error logging and handling
-
-## Safety Features
-
-- **Order Limits**: Configurable maximum order count
-- **Timeout Handling**: Automatic order cancellation on timeouts
-- **Position Monitoring**: Continuous position and order status checking
-- **Error Recovery**: Graceful handling of API errors and disconnections
 
 ## Contributing
 
@@ -203,11 +204,3 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Disclaimer
 
 This software is for educational and research purposes only. Trading cryptocurrencies involves significant risk and can result in substantial financial losses. Use at your own risk and never trade with money you cannot afford to lose.
-
-## Support
-
-For issues related to:
-
-- **EdgeX API**: Check the [EdgeX API documentation](https://docs.edgex.exchange)
-- **EdgeX SDK**: Check the [EdgeX Python SDK documentation](https://github.com/edgex-Tech/edgex-python-sdk)
-- **This Bot**: Open an issue in this repository

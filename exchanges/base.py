@@ -52,6 +52,7 @@ class OrderInfo:
     status: str
     filled_size: Decimal = 0.0
     remaining_size: Decimal = 0.0
+    cancel_reason: str = ''
 
 
 class BaseExchangeClient(ABC):

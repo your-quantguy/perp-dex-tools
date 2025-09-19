@@ -6,6 +6,7 @@ from typing import Dict, Any
 from .base import BaseExchangeClient
 from .edgex import EdgeXClient
 from .backpack import BackpackClient
+from .paradex import ParadexClient
 
 
 class ExchangeFactory:
@@ -14,6 +15,7 @@ class ExchangeFactory:
     _registered_exchanges = {
         'edgex': EdgeXClient,
         'backpack': BackpackClient,
+        'paradex': ParadexClient,
     }
 
     @classmethod

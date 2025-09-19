@@ -1,0 +1,2 @@
+# Paradex Python SDK
+git+https://github.com/tradeparadex/paradex-py.git@7eb7aa3825d466b2f14abd3e94f2ce6b002d6a63

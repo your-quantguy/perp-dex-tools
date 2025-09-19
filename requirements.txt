@@ -1,4 +1,3 @@
-# EdgeX Trading Bot Dependencies
 python-dotenv>=1.0.0
 pytz>=2025.2
 asyncio==4.0.0
