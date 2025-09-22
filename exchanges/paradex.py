@@ -493,7 +493,7 @@ class ParadexClient(BaseExchangeClient):
             # Get order by ID using official SDK
             order_data = self.paradex.api_client.fetch_order(order_id)
             size = Decimal(order_data.get('size', 0)).quantize(self.order_size_increment, rounding=ROUND_HALF_UP)
-            remaining_size = size - Decimal(order_data.get('filled_size', 0))
+            remaining_size = Decimal(order_data.get('remaining_size', 0))
             return OrderInfo(
                 order_id=order_data.get('id', ''),
                 side=order_data.get('side', '').lower(),
