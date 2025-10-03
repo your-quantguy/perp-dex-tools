@@ -23,3 +23,6 @@ tenacity>=9.1.2
 
 # Lighter exchange SDK
 git+https://github.com/elliottech/lighter-python.git@d0009799970aad54ebb940aa3dc90cbc00028c54
+
+# Extended exchange SDK
+x10-python-trading-starknet
