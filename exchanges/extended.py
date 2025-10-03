@@ -39,7 +39,8 @@ async def _stream_worker(
         try:
             async with websockets.connect(
                 url, 
-                ping_interval=None,
+                ping_interval=20,
+                ping_timeout=20,
                 extra_headers=extra_headers
             ) as ws:
                 print(f"✅ connected to {url}")
@@ -104,6 +105,8 @@ class ExtendedClient(BaseExchangeClient):
         self.open_orders = {} # {order_id: order_info}
         self.partially_filled_size = 0
         self.partially_filled_avg_price = 0
+        self.initial_check_for_open_orders = True  # PATCH: will turn to False after 2 times (to match the trading bot logic), so that we can get the open orders even after restarting the script
+        self.get_active_orders_cnt = 0
 
     def round_to_tick(self, price: Decimal, contract_id: str) -> Decimal:
         """Round price to the appropriate tick size based on asset precision."""
@@ -340,10 +343,21 @@ class ExtendedClient(BaseExchangeClient):
                 adjusted_price = price
                 
                 # PATCH: (for partially filled orders) Adjust the quantity to add partially filled order size so that we can close them together
+                # cache these just in case order fails to place
+                prev_partially_filled_size = self.partially_filled_size
+                prev_partially_filled_avg_price = self.partially_filled_avg_price
+                
                 if self.partially_filled_size > 0:
+                    self.logger.log(f"Adding partially_filled_size {self.partially_filled_size} and partially_filled_avg_price {self.partially_filled_avg_price} to the close order", level="INFO")
                     quantity = quantity + self.partially_filled_size
                     expected_tp_price_for_partial_fills = (1 + self.config.take_profit/100) * self.partially_filled_avg_price
                     adjusted_price = (price * quantity + expected_tp_price_for_partial_fills * self.partially_filled_size) / (quantity + self.partially_filled_size)
+                    self.logger.log(f"Updated close order quantity to {quantity} and adjusted_price to {adjusted_price}", level="INFO")
+
+                    # reset to 0
+                    self.partially_filled_size = 0
+                    self.partially_filled_avg_price = 0
+                    self.logger.log(f"Reset partially_filled_size and partially_filled_avg_price to 0", level="INFO")
 
                 if side.lower() == 'sell':
                     # For sell orders, ensure price is above best bid to be a maker order
@@ -375,6 +389,10 @@ class ExtendedClient(BaseExchangeClient):
                 )
 
                 if not order_result or not order_result.data or order_result.status != 'OK':
+                    # reset to previous values
+                    self.partially_filled_size = prev_partially_filled_size
+                    self.partially_filled_avg_price = prev_partially_filled_avg_price
+                    self.logger.log(f"Reverted partially_filled_size and partially_filled_avg_price to {prev_partially_filled_size} and {prev_partially_filled_avg_price}", level="INFO")
                     return OrderResult(success=False, error_message='Failed to place order')
 
                 # Extract order ID from response
@@ -445,10 +463,15 @@ class ExtendedClient(BaseExchangeClient):
                 if order_info.filled_size >= min_order_size:
                     filled_size = order_info.filled_size
                 elif order_info.filled_size > 0:
-                    self.logger.log(f"Order {order_id} is partially filled, but filled size is less than min order size, returning filled_size as 0, we will send a close order for this later", level="ERROR")
+                    self.logger.log(f"Order {order_id} is partially filled, but filled size is less than min order size, returning filled_size as 0, we will send a close order for this later", level="INFO")
+                    self.logger.log(f"Caching partially filled size and price: {order_info.filled_size} and {order_info.price}", level="INFO")
                     # cache this filled_size and price
                     self.partially_filled_size = self.partially_filled_size + order_info.filled_size
-                    self.partially_filled_avg_price = (self.partially_filled_avg_price * self.partially_filled_size + order_info.filled_size * order_info.price) / (self.partially_filled_size + order_info.filled_size)
+                    if self.partially_filled_avg_price > 0:
+                        self.partially_filled_avg_price = (self.partially_filled_avg_price * self.partially_filled_size + order_info.filled_size * order_info.price) / (self.partially_filled_size + order_info.filled_size)
+                    else:
+                        self.partially_filled_avg_price = order_info.price
+                    self.logger.log(f"Updated partially filled size and price: {self.partially_filled_size} and {self.partially_filled_avg_price}", level="INFO")
                 else:
                     # filled_size is 0
                     pass
@@ -464,6 +487,7 @@ class ExtendedClient(BaseExchangeClient):
                 # revert this
                 self.partially_filled_size = prev_partially_filled_size
                 self.partially_filled_avg_price = prev_partially_filled_avg_price
+                self.logger.log(f"Reverted partially filled size and price: {self.partially_filled_size} and {self.partially_filled_avg_price}", level="INFO")
                 return OrderResult(success=False, error_message='Failed to cancel order')
 
             self.logger.log(f"Successfully canceled order {order_id}", level="INFO")
@@ -494,28 +518,38 @@ class ExtendedClient(BaseExchangeClient):
         """Get active orders for a contract using official SDK."""
         ## ORIGINAL
         # contract_id should be market name, e.g. ETH-USD
-        # active_orders = await self.perpetual_trading_client.account.get_open_orders(market_names=[contract_id])
+        if self.initial_check_for_open_orders:
+            active_orders = await self.perpetual_trading_client.account.get_open_orders(market_names=[contract_id])
 
-        # if not active_orders or not hasattr(active_orders, 'data'):
-        #     return []
+            if not active_orders or not hasattr(active_orders, 'data'):
+                return []
 
-        # Filter orders for the specific contract and ensure they are dictionaries
-        # The API returns orders under 'data' key as a list
-        # order_list = active_orders.data
-        # contract_orders = []
+            # Filter orders for the specific contract and ensure they are dictionaries
+            # The API returns orders under 'data' key as a list
+            order_list = active_orders.data
+            contract_orders = []
 
-        # for order in order_list:
-        #     if order.market == contract_id:
-        #         contract_orders.append(OrderInfo(
-        #             order_id=order.id,
-        #             side=order.side.lower(),
-        #             size=Decimal(order.qty),
-        #             price=Decimal(order.price),
-        #             status=order.status,
-        #             filled_size=Decimal(order.filled_qty),
-        #             remaining_size=Decimal(order.qty) - Decimal(order.filled_qty)
-        #         ))
-                
+            for order in order_list:
+                if order.market == contract_id:
+                    contract_orders.append(OrderInfo(
+                        order_id=order.id,
+                        side=order.side.lower(),
+                        size=Decimal(order.qty) - Decimal(order.filled_qty),  # PATCH: changed this to remaining size to match with the trading bot logic, might cause issues later if main trading bot logic is changed
+                        price=Decimal(order.price),
+                        status=order.status,
+                        filled_size=Decimal(order.filled_qty),
+                        remaining_size=Decimal(order.qty) - Decimal(order.filled_qty)
+                    ))
+            
+            # use the websocket method for the remaining orders updates
+            if self.get_active_orders_cnt == 0:
+                self.get_active_orders_cnt += 1
+            else:
+                self.get_active_orders_cnt += 1
+                if self.get_active_orders_cnt == 2:
+                    self.initial_check_for_open_orders = False
+            return contract_orders
+              
         ## FIX
         # use open orders dict because there is a delay in the official Rest API
         order_list = self.open_orders.values()
