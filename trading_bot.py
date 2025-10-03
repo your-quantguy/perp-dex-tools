@@ -138,9 +138,14 @@ class TradingBot:
 
                         if self.order_filled_amount > 0:
                             self.logger.log_transaction(order_id, side, self.order_filled_amount, message.get('price'), status)
-
-                    self.logger.log(f"[{order_type}] [{order_id}] {status} "
-                                    f"{message.get('size')} @ {message.get('price')}", "INFO")
+                            
+                    # PATCH
+                    if self.config.exchange == "extended":
+                        self.logger.log(f"[{order_type}] [{order_id}] {status} "
+                                        f"{Decimal(message.get('size')) - filled_size} @ {message.get('price')}", "INFO")
+                    else:
+                        self.logger.log(f"[{order_type}] [{order_id}] {status} "
+                                        f"{message.get('size')} @ {message.get('price')}", "INFO")
                 elif status == "PARTIALLY_FILLED":
                     self.logger.log(f"[{order_type}] [{order_id}] {status} "
                                     f"{filled_size} @ {message.get('price')}", "INFO")
@@ -311,7 +316,7 @@ class TradingBot:
                     self.order_canceled_event.set()
                     self.logger.log(f"[CLOSE] Error canceling order {order_id}: {e}", "ERROR")
 
-                if self.config.exchange == "backpack":
+                if self.config.exchange == "backpack" or self.config.exchange == "extended":
                     self.order_filled_amount = cancel_result.filled_size
                 else:
                     # Wait for cancel event or timeout
