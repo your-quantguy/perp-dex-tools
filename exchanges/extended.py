@@ -96,7 +96,7 @@ class ExtendedClient(BaseExchangeClient):
             print("Warning: market_info_extended.json not found. Price precision adjustment will be skipped.")
 
         # Initialize logger using the same format as helpers
-        self.logger = TradingLogger(exchange="extended", ticker=self.config.ticker, suffix=self.config.suffix, log_to_console=True)
+        self.logger = TradingLogger(exchange="extended", ticker=self.config.ticker, log_to_console=True)
         self._order_update_handler = None
 
         self.orderbook = None
