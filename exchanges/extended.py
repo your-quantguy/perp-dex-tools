@@ -28,6 +28,8 @@ import asyncio
 
 from dotenv import load_dotenv
 import os
+from datetime import datetime, timezone, timedelta
+
 load_dotenv()
 
 async def _stream_worker(
@@ -63,6 +65,8 @@ async def _stream_worker(
             print(f"❌ {url} error: {e}")
             await asyncio.sleep(3)  # simple reconnect delay
 
+def utc_now():
+    return datetime.now(tz=timezone.utc)
 
 class ExtendedClient(BaseExchangeClient):
     """Extended exchange client implementation."""
@@ -92,7 +96,7 @@ class ExtendedClient(BaseExchangeClient):
             print("Warning: market_info_extended.json not found. Price precision adjustment will be skipped.")
 
         # Initialize logger using the same format as helpers
-        self.logger = TradingLogger(exchange="extended", ticker=self.config.ticker, log_to_console=True)
+        self.logger = TradingLogger(exchange="extended", ticker=self.config.ticker, suffix=self.config.suffix, log_to_console=True)
         self._order_update_handler = None
 
         self.orderbook = None
@@ -261,6 +265,9 @@ class ExtendedClient(BaseExchangeClient):
                 if contract_id in self._market_info:
                     price_tick = Decimal(self._market_info[contract_id]['minPriceChange'])
                     rounded_price = (rounded_price / price_tick).quantize(Decimal('1')) * price_tick
+                    
+                # set timeout to 9 seconds for open orders to avoid orders being filled right when trading_bot hit 10s timeout and call cancel_order
+                expire_time = utc_now() + timedelta(seconds=9)
 
                 # Place the order using official SDK (post-only to ensure maker order)
                 order_result = await self.perpetual_trading_client.place_order(
@@ -269,7 +276,8 @@ class ExtendedClient(BaseExchangeClient):
                     price=rounded_price,
                     side=side,
                     time_in_force=TimeInForce.GTT,
-                    post_only=True  # Ensure MAKER orders
+                    post_only=True,  # Ensure MAKER orders
+                    expire_time=expire_time
                 )
 
                 if not order_result or not order_result.data or order_result.status != 'OK':
