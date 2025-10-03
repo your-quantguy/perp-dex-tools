@@ -112,13 +112,13 @@ class ExtendedClient(BaseExchangeClient):
         self.initial_check_for_open_orders = True  # PATCH: will turn to False after 2 times (to match the trading bot logic), so that we can get the open orders even after restarting the script
         self.get_active_orders_cnt = 0
 
-    def round_to_tick(self, price: Decimal, contract_id: str) -> Decimal:
+    def round_to_tick(self, price: Decimal) -> Decimal:
         """Round price to the appropriate tick size based on asset precision."""
-        if contract_id not in self._market_info:
+        if self.config.contract_id not in self._market_info:
             return price
         
-        asset_precision = self._market_info[contract_id].get('assetPrecision', 0)
-        min_price_change = Decimal(self._market_info[contract_id].get('minPriceChange', '0.00001'))
+        asset_precision = self._market_info[self.config.contract_id].get('assetPrecision', 0)
+        min_price_change = Decimal(self._market_info[self.config.contract_id].get('minPriceChange', '0.00001'))
         
         # Round to the minimum price change
         rounded_price = (price / min_price_change).quantize(Decimal('1'), rounding=ROUND_HALF_UP) * min_price_change
@@ -259,7 +259,7 @@ class ExtendedClient(BaseExchangeClient):
                     side = OrderSide.SELL
 
                 # Round price to appropriate precision
-                rounded_price = self.round_to_tick(order_price, contract_id)
+                rounded_price = self.round_to_tick(order_price)
 
                 # Adjust price to meet market precision requirements (from extended_old.py logic)
                 if contract_id in self._market_info:
@@ -379,7 +379,7 @@ class ExtendedClient(BaseExchangeClient):
                         adjusted_price = best_ask - tick_size
 
                 # Round price to appropriate precision
-                rounded_price = self.round_to_tick(adjusted_price, contract_id)
+                rounded_price = self.round_to_tick(adjusted_price)
 
                 # Adjust price to meet market precision requirements (from extended_old.py logic)
                 if contract_id in self._market_info:
@@ -613,7 +613,7 @@ class ExtendedClient(BaseExchangeClient):
     async def handle_account(self, message):
         """Handle order updates from WebSocket using correct pattern."""
         try:
-            self.logger.log("Received account update", "INFO")
+            # self.logger.log("Received account update", "INFO")
             
             # Parse the message structure
             if isinstance(message, str):
@@ -660,7 +660,7 @@ class ExtendedClient(BaseExchangeClient):
                         elif status == "CANCELED" or status == "FILLED":
                             self.open_orders.pop(order_id, None)
                                                                  
-                        self.logger.log(f"Open orders: {self.open_orders}", "INFO")
+                        # self.logger.log(f"Open orders: {self.open_orders}", "INFO")
 
                         # ignore canceled close orders
                         if status == "CANCELED" and order_type == "CLOSE":
@@ -757,5 +757,20 @@ class ExtendedClient(BaseExchangeClient):
         self.config.tick_size = tick_size
 
         return self.config.contract_id, self.config.tick_size
-    
+
+    async def get_order_price(self, direction: str) -> Decimal:
+        """Get the price of an order with Backpack using official SDK."""
+        best_bid, best_ask = await self.fetch_bbo_prices(self.config.contract_id)
+        if best_bid <= 0 or best_ask <= 0:
+            self.logger.log("Invalid bid/ask prices", "ERROR")
+            raise ValueError("Invalid bid/ask prices")
+
+        if direction == 'buy':
+            # For buy orders, place slightly below best ask to ensure execution
+            order_price = best_ask - self.config.tick_size
+        else:
+            # For sell orders, place slightly above best bid to ensure execution
+            order_price = best_bid + self.config.tick_size
+        return self.round_to_tick(order_price)
+
     
