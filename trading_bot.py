@@ -388,6 +388,7 @@ class TradingBot:
                 # Check for position mismatch
                 if abs(position_amt - active_close_amount) > (2 * self.config.quantity):
                     error_message = f"\n\nERROR: [{self.config.exchange.upper()}_{self.config.ticker.upper()}] "
+                    error_message += f"{os.getenv('ACCOUNT_NAME')}\n"
                     error_message += "Position mismatch detected\n"
                     error_message += "###### ERROR ###### ERROR ###### ERROR ###### ERROR #####\n"
                     error_message += "Please manually rebalance your position and take-profit orders\n"
@@ -531,6 +532,7 @@ class TradingBot:
                 stop_trading, pause_trading = await self._check_price_condition()
                 if stop_trading:
                     msg = f"\n\nWARNING: [{self.config.exchange.upper()}_{self.config.ticker.upper()}] \n"
+                    msg += f"{os.getenv('ACCOUNT_NAME')}\n"
                     msg += "Stopped trading due to stop price triggered\n"
                     msg += "价格已经达到停止交易价格，脚本将停止交易\n"
                     await self.send_notification(msg.lstrip())
