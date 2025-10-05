@@ -421,6 +421,95 @@ class ParadexClient(BaseExchangeClient):
         else:
             raise Exception(f"[OPEN] [{order_id}] Unexpected order status: {order_status}")
 
+    async def place_market_order(self, contract_id: str, quantity: Decimal, direction: str) -> OrderResult:
+        """Place a market order on Paradex for immediate execution."""
+        from paradex_py.common.order import Order, OrderType, OrderSide
+        if direction == 'buy':
+            order_side = OrderSide.Buy
+        elif direction == 'sell':
+            order_side = OrderSide.Sell
+        else:
+            raise Exception(f"[MARKET] Invalid direction: {direction}")
+
+        order = Order(
+            market=contract_id,
+            order_type=OrderType.Market,
+            order_side=order_side,
+            size=quantity.quantize(self.order_size_increment, rounding=ROUND_HALF_UP)
+        )
+
+        order_result = self._submit_order_with_retry(order)
+        order_id = order_result.get('id')
+        start_time = time.time()
+        status = order_result.get('status', 'NEW')
+        info = await self.get_order_info(order_id)
+        if info is not None:
+            status = info.status
+        while status in ['NEW', 'OPEN'] and time.time() - start_time < 10:
+            await asyncio.sleep(0.05)
+            info = await self.get_order_info(order_id)
+            if info is not None:
+                status = info.status
+
+        if info is None:
+            raise Exception(f"[MARKET] Failed to fetch order info: {order_id}")
+
+        return OrderResult(
+            success=True,
+            order_id=info.order_id,
+            side=direction,
+            size=info.size,
+            price=info.price,
+            status=info.status
+        )
+
+    async def place_aggressive_limit_order(self, contract_id: str, quantity: Decimal, direction: str) -> OrderResult:
+        """Fallback: aggressive limit crossing the spread to ensure execution (non post-only)."""
+        from paradex_py.common.order import Order, OrderType, OrderSide
+        best_bid, best_ask = await self.fetch_bbo_prices(contract_id)
+
+        if direction == 'buy':
+            order_side = OrderSide.Buy
+            limit_price = self.round_to_tick(best_ask + self.config.tick_size)
+        elif direction == 'sell':
+            order_side = OrderSide.Sell
+            limit_price = self.round_to_tick(best_bid - self.config.tick_size)
+        else:
+            raise Exception(f"[LIMIT] Invalid direction: {direction}")
+
+        order = Order(
+            market=contract_id,
+            order_type=OrderType.Limit,
+            order_side=order_side,
+            size=quantity.quantize(self.order_size_increment, rounding=ROUND_HALF_UP),
+            limit_price=limit_price
+        )
+
+        order_result = self._submit_order_with_retry(order)
+        order_id = order_result.get('id')
+        start_time = time.time()
+        status = order_result.get('status', 'NEW')
+        info = await self.get_order_info(order_id)
+        if info is not None:
+            status = info.status
+        while status in ['NEW', 'OPEN'] and time.time() - start_time < 10:
+            await asyncio.sleep(0.05)
+            info = await self.get_order_info(order_id)
+            if info is not None:
+                status = info.status
+
+        if info is None:
+            raise Exception(f"[LIMIT] Failed to fetch order info: {order_id}")
+
+        return OrderResult(
+            success=True,
+            order_id=info.order_id,
+            side=direction,
+            size=info.size,
+            price=info.price,
+            status=info.status
+        )
+
     async def _get_active_close_orders(self, contract_id: str) -> int:
         """Get active close orders for a contract using official SDK."""
         active_orders = await self.get_active_orders(contract_id)

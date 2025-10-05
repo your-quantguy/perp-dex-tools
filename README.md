@@ -4,6 +4,56 @@
 
 **English speakers**: Please read README_EN.md for the English version of this documentation.
 
+### Hedge strategy quickstart (Python 3.11)
+
+由于 Paradex 与 Lighter 的 SDK 传递依赖存在冲突，建议使用 Python 3.11 并按下述固定方案安装。
+
+1) 创建并激活 Python 3.11 虚拟环境
+
+```bash
+/opt/homebrew/bin/python3.11 -m venv .venv311
+source .venv311/bin/activate
+python -m pip install --upgrade pip
+```
+
+2) 安装固定依赖（避免 Paradex 与 Lighter 的版本冲突）
+
+```bash
+pip install -r hedge_requirements.txt
+```
+
+3) 安装 Lighter SDK（不解析依赖，避免把 eth-account 升级到 0.13+）
+
+```bash
+# 可直连 GitHub 时：
+pip install --no-deps git+https://github.com/elliottech/lighter-python.git@d0009799970aad54ebb940aa3dc90cbc00028c54
+
+# 无法直连时，先手动下载上述 commit 的 ZIP，然后本地安装
+# 例如：~/Downloads/lighter-python-d00097.zip
+# pip install --no-deps ~/Downloads/lighter-python-d00097.zip
+```
+
+4) 配置环境变量
+
+在项目根目录创建 `.env`（参考 `env_example.txt`），至少需要：
+
+- Lighter：`API_KEY_PRIVATE_KEY`, `LIGHTER_ACCOUNT_INDEX`, `LIGHTER_API_KEY_INDEX`
+- Paradex：`PARADEX_L1_ADDRESS`, `PARADEX_L2_PRIVATE_KEY`, `PARADEX_ENVIRONMENT`（`prod` 或 `testnet`）
+
+5) 运行对冲脚本
+
+```bash
+python run_hedge_strategy.py \
+  --ticker ETH-PERP \
+  --quantity 0.1 \
+  --side buy \
+  --price-offset-ticks 1 \
+  --order-timeout 60 \
+  --max-retries 3
+```
+
+日志输出在 `logs/` 目录，同时会在控制台显示关键流程日志。
+
 ## 📢 分享说明
 
 **欢迎分享本项目！** 如果您要分享或修改此代码，请务必包含对原始仓库的引用。我们鼓励开源社区的发展，但请保持对原作者工作的尊重和认可。

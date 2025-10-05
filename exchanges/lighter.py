@@ -260,9 +260,27 @@ class LighterClient(BaseExchangeClient):
         # Create order using official SDK
         create_order, tx_hash, error = await self.lighter_client.create_order(**order_params)
         if error is not None:
-            return OrderResult(
-                success=False, order_id=str(order_params['client_order_index']),
-                error_message=f"Order creation error: {error}")
+            # Handle invalid nonce by reinitializing signer client once
+            if 'invalid nonce' in str(error).lower():
+                try:
+                    self.logger.log("Invalid nonce from Lighter, reinitializing client and retrying once", "WARNING")
+                    # Force re-init of signer client to refresh nonce
+                    self.lighter_client = None
+                    await self._initialize_lighter_client()
+                    create_order, tx_hash, error = await self.lighter_client.create_order(**order_params)
+                    # If retry succeeded, return success immediately
+                    if error is None:
+                        return OrderResult(success=True, order_id=str(order_params['client_order_index']))
+                except Exception as e:
+                    return OrderResult(
+                        success=False,
+                        order_id=str(order_params['client_order_index']),
+                        error_message=f"Order creation error after reinit: {e}")
+
+            if error is not None:
+                return OrderResult(
+                    success=False, order_id=str(order_params['client_order_index']),
+                    error_message=f"Order creation error: {error}")
 
         else:
             return OrderResult(success=True, order_id=str(order_params['client_order_index']))
