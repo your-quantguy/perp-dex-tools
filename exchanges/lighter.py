@@ -162,6 +162,8 @@ class LighterClient(BaseExchangeClient):
             if self.api_client:
                 await self.api_client.close()
                 self.api_client = None
+                
+            self.logger.log("Lighter connection closed properly", "INFO")
         except Exception as e:
             self.logger.log(f"Error during Lighter disconnect: {e}", "ERROR")
 
@@ -227,6 +229,30 @@ class LighterClient(BaseExchangeClient):
                     cancel_reason=''
                 )
                 self.current_order = current_order
+                
+                # Call external handler if set for any order update
+                if hasattr(self, '_order_update_handler') and self._order_update_handler:
+                    try:
+                        self._order_update_handler(current_order)
+                    except Exception as e:
+                        self.logger.log(f"Error calling order update handler: {e}", "ERROR")
+            
+            # Also call handler for any order that might be relevant (not just current_order)
+            elif hasattr(self, '_order_update_handler') and self._order_update_handler:
+                order_info = OrderInfo(
+                    order_id=order_id,
+                    side=side,
+                    size=size,
+                    price=price,
+                    status=status,
+                    filled_size=filled_size,
+                    remaining_size=remaining_size,
+                    cancel_reason=''
+                )
+                try:
+                    self._order_update_handler(order_info)
+                except Exception as e:
+                    self.logger.log(f"Error calling order update handler: {e}", "ERROR")
 
             if status in ['FILLED', 'CANCELED']:
                 self.logger.log_transaction(order_id, side, filled_size, price, status)
@@ -365,9 +391,28 @@ class LighterClient(BaseExchangeClient):
         self.current_order_client_id = None
         order_result = await self.place_limit_order(contract_id, quantity, price, side)
 
-        # wait for 5 seconds to ensure order is placed
-        await asyncio.sleep(5)
-        if order_result.success:
+        if not order_result.success:
+            raise Exception(f"[CLOSE] Error placing order: {order_result.error_message}")
+
+        # Wait for current_order to be updated via WebSocket, similar to place_open_order
+        start_time = time.time()
+        order_status = 'OPEN'
+
+        # Wait up to 10 seconds for order confirmation
+        while time.time() - start_time < 10 and self.current_order is None:
+            await asyncio.sleep(0.1)
+
+        if self.current_order is not None:
+            return OrderResult(
+                success=True,
+                order_id=self.current_order.order_id,
+                side=side,
+                size=quantity,
+                price=price,
+                status=self.current_order.status
+            )
+        else:
+            # Fallback if WebSocket update didn't arrive
             return OrderResult(
                 success=True,
                 order_id=order_result.order_id,
@@ -376,8 +421,6 @@ class LighterClient(BaseExchangeClient):
                 price=price,
                 status='OPEN'
             )
-        else:
-            raise Exception(f"[CLOSE] Error placing order: {order_result.error_message}")
     
     async def get_order_price(self, side: str = '') -> Decimal:
         """Get the price of an order with Lighter using official SDK."""
@@ -422,10 +465,15 @@ class LighterClient(BaseExchangeClient):
     async def get_order_info(self, order_id: str) -> Optional[OrderInfo]:
         """Get order information from Lighter using official SDK."""
         try:
+            # First try to find the order in active orders
+            active_orders = await self.get_active_orders(self.config.contract_id)
+            for order in active_orders:
+                if order.order_id == order_id:
+                    return order
+            
+            # If not found in active orders, check if it might be filled by looking at positions
             # Use shared API client to get account info
             account_api = lighter.AccountApi(self.api_client)
-
-            # Get account orders
             account_data = await account_api.account(by="index", value=str(self.account_index))
 
             # Look for the specific order in account positions
@@ -433,16 +481,18 @@ class LighterClient(BaseExchangeClient):
                 if position.symbol == self.config.ticker:
                     position_amt = abs(float(position.position))
                     if position_amt > 0.001:  # Only include significant positions
+                        # Return a filled order info based on position
                         return OrderInfo(
                             order_id=order_id,
                             side="buy" if float(position.position) > 0 else "sell",
                             size=Decimal(str(position_amt)),
                             price=Decimal(str(position.avg_price)),
-                            status="FILLED",  # Positions are filled orders
+                            status="FILLED",  # Positions indicate filled orders
                             filled_size=Decimal(str(position_amt)),
                             remaining_size=Decimal('0')
                         )
 
+            # If order not found anywhere, it might be canceled or expired
             return None
 
         except Exception as e:
@@ -480,29 +530,34 @@ class LighterClient(BaseExchangeClient):
 
     async def get_active_orders(self, contract_id: str) -> List[OrderInfo]:
         """Get active orders for a contract using official SDK."""
-        order_list = await self._fetch_orders_with_retry()
+        try:
+            order_list = await self._fetch_orders_with_retry()
 
-        # Filter orders for the specific market
-        contract_orders = []
-        for order in order_list:
-            # Convert Lighter Order to OrderInfo
-            side = "sell" if order.is_ask else "buy"
-            size = Decimal(order.initial_base_amount)
-            price = Decimal(order.price)
+            # Filter orders for the specific market
+            contract_orders = []
+            for order in order_list:
+                # Convert Lighter Order to OrderInfo
+                side = "sell" if order.is_ask else "buy"
+                initial_size = Decimal(order.initial_base_amount)
+                price = Decimal(order.price)
+                filled_size = Decimal(order.filled_base_amount)
+                remaining_size = Decimal(order.remaining_base_amount)
 
-            # Only include orders with remaining size > 0
-            if size > 0:
+                # Include all orders (active, filled, canceled)
                 contract_orders.append(OrderInfo(
                     order_id=str(order.order_index),
                     side=side,
-                    size=Decimal(order.remaining_base_amount),  # FIXME: This is wrong. Should be size
+                    size=initial_size,  # Fixed: use initial_base_amount as total size
                     price=price,
                     status=order.status.upper(),
-                    filled_size=Decimal(order.filled_base_amount),
-                    remaining_size=Decimal(order.remaining_base_amount)
+                    filled_size=filled_size,
+                    remaining_size=remaining_size
                 ))
 
-        return contract_orders
+            return contract_orders
+        except Exception as e:
+            self.logger.log(f"Error getting active orders: {e}", "ERROR")
+            return []
 
     @query_retry(reraise=True)
     async def _fetch_positions_with_retry(self) -> List[Dict[str, Any]]:

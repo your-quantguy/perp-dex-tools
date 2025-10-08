@@ -156,8 +156,17 @@ class ParadexClient(BaseExchangeClient):
         """Disconnect from Paradex."""
         try:
             if hasattr(self, 'paradex') and self.paradex:
-                await self.paradex.ws_client._close_connection()
+                # Close WebSocket connection properly
+                if hasattr(self.paradex, 'ws_client') and self.paradex.ws_client:
+                    await self.paradex.ws_client._close_connection()
+                
+                # Close HTTP client session if it exists
+                if hasattr(self.paradex, 'http_client') and hasattr(self.paradex.http_client, 'client'):
+                    if hasattr(self.paradex.http_client.client, 'close'):
+                        await self.paradex.http_client.client.close()
+                
                 self._ws_connected = False
+                self.logger.log("Paradex connection closed properly", "INFO")
         except Exception as e:
             self.logger.log(f"Error during Paradex disconnect: {e}", "ERROR")
 

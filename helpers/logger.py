@@ -73,7 +73,7 @@ class TradingLogger:
         # Console handler if requested
         if log_to_console:
             console_handler = logging.StreamHandler()
-            console_handler.setLevel(logging.INFO)
+            console_handler.setLevel(logging.DEBUG)  # Show DEBUG logs in console for better debugging
             console_handler.setFormatter(formatter)
             logger.addHandler(console_handler)
 

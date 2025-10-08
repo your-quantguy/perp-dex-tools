@@ -21,6 +21,9 @@ async def main():
     parser.add_argument('--price-offset-ticks', type=int, default=1, help='BBO价格偏移的tick数量')
     parser.add_argument('--order-timeout', type=int, default=60, help='订单超时取消时间（秒）')
     parser.add_argument('--max-retries', type=int, default=3, help='取消后最大重试次数')
+    parser.add_argument('--auto-cancel-enabled', action='store_true', default=True, help='启用自动取消重新挂单')
+    parser.add_argument('--price-check-interval', type=int, default=5, help='价格检查间隔（秒）')
+    parser.add_argument('--price-tolerance', type=float, default=0.001, help='价格容忍度（0.001 = 0.1%）')
     args = parser.parse_args()
 
     # 加载环境变量
@@ -42,6 +45,9 @@ async def main():
         "price_offset_ticks": args.price_offset_ticks,
         "order_timeout_seconds": args.order_timeout,
         "max_retries": args.max_retries,
+        "auto_cancel_enabled": args.auto_cancel_enabled,
+        "price_check_interval": args.price_check_interval,
+        "price_tolerance": args.price_tolerance,
     }
 
     # Exchange-specific configs as attribute objects (expected by clients)
