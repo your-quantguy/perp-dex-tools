@@ -38,7 +38,8 @@ class LighterClient(BaseExchangeClient):
         self.api_key_private_key = os.getenv('API_KEY_PRIVATE_KEY')
         self.account_index = int(os.getenv('LIGHTER_ACCOUNT_INDEX', '0'))
         self.api_key_index = int(os.getenv('LIGHTER_API_KEY_INDEX', '0'))
-        self.base_url = "https://mainnet.zklighter.elliot.ai"
+        # Allow overriding base URL via env to handle region/network issues
+        self.base_url = os.getenv('LIGHTER_BASE_URL', "https://mainnet.zklighter.elliot.ai")
 
         if not self.api_key_private_key:
             raise ValueError("API_KEY_PRIVATE_KEY must be set in environment variables")
@@ -109,10 +110,29 @@ class LighterClient(BaseExchangeClient):
                     api_key_index=self.api_key_index,
                 )
 
-                # Check client
-                err = self.lighter_client.check_client()
-                if err is not None:
-                    raise Exception(f"CheckClient error: {err}")
+                # Check client with simple retries to mitigate transient network timeouts
+                max_attempts = 3
+                last_err = None
+                for attempt in range(1, max_attempts + 1):
+                    err = self.lighter_client.check_client()
+                    if err is None:
+                        last_err = None
+                        break
+                    last_err = err
+                    # If timeout or network error, backoff and retry
+                    if "Timeout" in str(err) or "context deadline exceeded" in str(err):
+                        self.logger.log(
+                            f"CheckClient attempt {attempt}/{max_attempts} failed: {err}. Retrying...",
+                            "WARNING"
+                        )
+                        # small async backoff
+                        await asyncio.sleep(2 * attempt)
+                        continue
+                    # Non-timeout error -> don't retry further
+                    break
+
+                if last_err is not None:
+                    raise Exception(f"CheckClient error: {last_err}")
 
                 self.logger.log("Lighter client initialized successfully", "INFO")
             except Exception as e:

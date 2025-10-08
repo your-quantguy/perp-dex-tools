@@ -54,11 +54,23 @@ class HedgeStrategy:
         self.lighter_order_filled = False
         self.order_placement_time = None
         self.current_retry_count = 0
+
+        # Hedging cycle configuration and state
+        self.hedge_cycle_seconds = int(self.config.get("hedge_cycle_seconds", 3600))
+        self.cycle_start_time: Optional[float] = None
+        self.cycle_count = 0
+        self.cycle_history = []
         
         # Auto cancel and replace configuration
         self.auto_cancel_enabled = config.get('auto_cancel_enabled', True)
         self.price_check_interval = config.get('price_check_interval', 5)  # seconds
         self.price_tolerance = config.get('price_tolerance', 0.001)  # 0.1% tolerance
+
+        # Risk control configuration
+        self.risk_enabled = config.get('risk_enabled', True)
+        # percentage threshold to trigger risk exit if current price within this percent of liq price
+        self.risk_threshold_pct = Decimal(str(config.get('risk_threshold_pct', 0.10)))
+        self.risk_check_interval = config.get('risk_check_interval', 2)  # seconds
 
     async def initialize(self):
         """Initialize connections to exchanges."""
@@ -123,6 +135,22 @@ class HedgeStrategy:
         price = self.lighter_client.round_to_tick(price)
         self.logger.log(f"Calculated limit price for {self.side}: {price}", "INFO")
         return price
+
+    def _maker_safe_price_for_side(self, side: str, best_bid: Decimal, best_ask: Decimal, offset_ticks: Optional[int] = None) -> Decimal:
+        """Return a maker-safe limit price for the given side using BBO.
+        - For `sell`: use `best_ask + n*tick` to avoid crossing the bid
+        - For `buy`:  use `best_bid - n*tick` to avoid crossing the ask
+        Ensures the order rests on the book and does not take liquidity.
+        """
+        ticks = int(offset_ticks) if offset_ticks is not None else int(self.price_offset_ticks or 0)
+        # Ensure at least 1 tick away to avoid crossing
+        ticks = max(1, ticks)
+        tick_size = self.lighter_client.config.tick_size
+        if side.lower() == 'sell':
+            price = best_ask + (tick_size * ticks)
+        else:
+            price = best_bid - (tick_size * ticks)
+        return self.lighter_client.round_to_tick(price)
     
     async def should_cancel_and_replace_order(self):
         """Check if the current order should be canceled and replaced based on price movement."""
@@ -238,7 +266,7 @@ class HedgeStrategy:
             # Place limit order on Lighter using place_close_order for limit orders
             direction = "long" if self.side == "buy" else "short"
             order_result = await self.lighter_client.place_close_order(
-                contract_id=self.ticker,
+                contract_id=self.lighter_client.config.contract_id,
                 quantity=self.quantity,
                 price=price,
                 side=self.side
@@ -249,6 +277,10 @@ class HedgeStrategy:
                 self.order_placement_time = time.time()
                 # Reset filled status for new order
                 self.lighter_order_filled = False
+                # Record cycle start time on first successful placement in a cycle
+                if not self.cycle_start_time:
+                    self.cycle_start_time = self.order_placement_time
+                    self.logger.log(f"Cycle started at {self.cycle_start_time}", "DEBUG")
                 self.logger.log(f"Lighter order placed successfully: {self.lighter_order_id} (attempt {self.current_retry_count + 1})", "INFO")
                 return True
             else:
@@ -272,14 +304,28 @@ class HedgeStrategy:
         # Polling loop
         poll_count = 0
         last_price_check_time = time.time()
+        last_risk_check_time = time.time()
         
         while self.is_running and not self.lighter_order_filled:
             try:
                 poll_count += 1
                 self.logger.log(f"Polling Lighter order status (attempt {poll_count})", "DEBUG")
-                
+
                 current_time = time.time()
-                
+
+                # Risk control: monitor liquidation proximity and exit if triggered
+                if self.risk_enabled and (poll_count == 1 or (current_time - last_risk_check_time >= self.risk_check_interval)):
+                    risk_triggered = await self.monitor_liquidation_risk()
+                    if risk_triggered:
+                        self.logger.log("Risk threshold triggered. Attempting to close positions on both exchanges and stop strategy.", "ERROR")
+                        try:
+                            await self.cancel_lighter_order()
+                        except Exception as e:
+                            self.logger.log(f"Error canceling lighter order during risk exit: {e}", "ERROR")
+                        await self.shutdown()
+                        return False
+                    last_risk_check_time = time.time()
+
                 # Check if order timeout has occurred
                 if self.order_placement_time and (current_time - self.order_placement_time > self.order_timeout_seconds):
                     self.logger.log(f"Order timeout reached ({self.order_timeout_seconds}s). Canceling and replacing order.", "INFO")
@@ -374,9 +420,196 @@ class HedgeStrategy:
                 self.logger.log(f"Error monitoring Lighter order: {e}", "ERROR")
                 self.logger.log("Waiting 5 seconds before retrying after error", "DEBUG")
                 await asyncio.sleep(5)  # Longer wait on error
-        
+
         self.logger.log(f"Exiting monitor loop, lighter_order_filled: {self.lighter_order_filled}", "DEBUG")
         return self.lighter_order_filled
+
+    async def monitor_liquidation_risk(self) -> bool:
+        """Check liquidation proximity across exchanges and trigger dual-side exit if needed.
+        Returns True if risk threshold is triggered and exit actions should be taken.
+        """
+        try:
+            # Fetch positions from both exchanges
+            lighter_pos = await self.lighter_client.get_account_positions()
+            paradex_pos = await self.paradex_client.get_account_positions()
+
+            # If no positions open, no risk
+            if lighter_pos == Decimal(0) and paradex_pos == Decimal(0):
+                return False
+
+            # Obtain current mark/mid price using BBO
+            best_bid, best_ask = await self.get_bbo_price()
+            current_price = (best_bid + best_ask) / Decimal(2)
+
+            # Try to obtain liquidation prices if available via clients; if not, approximate or skip
+            lighter_liq = getattr(self.lighter_client.config, 'liquidation_price', None)
+            paradex_liq = getattr(self.paradex_client.config, 'liquidation_price', None)
+
+            # If not provided, attempt rough heuristic using entry price when available (not implemented in clients)
+            # Fallback: no direct liq price available; skip triggering to avoid false positives
+            liq_prices = []
+            if lighter_liq is not None:
+                liq_prices.append(Decimal(str(lighter_liq)))
+            if paradex_liq is not None:
+                liq_prices.append(Decimal(str(paradex_liq)))
+
+            if not liq_prices:
+                # No liquidation price available from either exchange
+                return False
+
+            # If any liquidation price is within threshold of current price, trigger exit
+            threshold = current_price * self.risk_threshold_pct
+            for liq in liq_prices:
+                if abs(current_price - liq) <= threshold:
+                    # Trigger dual-side close and stop
+                    await self.dual_side_close_and_stop()
+                    return True
+
+            return False
+        except Exception as e:
+            self.logger.log(f"Error during liquidation risk monitoring: {e}", "ERROR")
+            return False
+
+    async def dual_side_close_and_stop(self):
+        """Attempt to close positions on both exchanges based on actual positions, then stop."""
+        try:
+            # Cancel any working orders first
+            try:
+                await self.cancel_lighter_order()
+            except Exception as e:
+                self.logger.log(f"Error canceling Lighter orders before close: {e}", "ERROR")
+
+            # Fetch current BBO for pricing
+            try:
+                best_bid, best_ask = await self.get_bbo_price()
+            except Exception as e:
+                self.logger.log(f"Error fetching BBO for close pricing: {e}", "ERROR")
+                best_bid, best_ask = Decimal(0), Decimal(0)
+
+            # Close on Lighter based on signed position
+            try:
+                lighter_pos = await self.lighter_client.get_account_positions()
+                lighter_close_side: Optional[str] = None
+                if lighter_pos > 0:
+                    lighter_close_side = 'sell'
+                elif lighter_pos < 0:
+                    lighter_close_side = 'buy'
+                if lighter_close_side:
+                    # Use maker-safe price to ensure resting limit order (avoid taker)
+                    price = self._maker_safe_price_for_side(lighter_close_side, best_bid, best_ask)
+                    await self.lighter_client.place_close_order(
+                        self.lighter_client.config.contract_id,
+                        self.quantity,
+                        price,
+                        lighter_close_side
+                    )
+            except Exception as e:
+                self.logger.log(f"Error placing Lighter close order: {e}", "ERROR")
+
+            # Close on Paradex only if a position exists; determine side from positions if available
+            try:
+                paradex_close_side: Optional[str] = None
+                # Prefer detailed position info when available
+                if hasattr(self.paradex_client, '_fetch_positions_with_retry'):
+                    try:
+                        positions = await self.paradex_client._fetch_positions_with_retry()
+                    except Exception:
+                        positions = []
+                    if positions:
+                        # Use first open position's side
+                        pos = positions[0]
+                        side_str = str(pos.get('side', '')).upper()
+                        if side_str == 'LONG':
+                            paradex_close_side = 'sell'
+                        elif side_str == 'SHORT':
+                            paradex_close_side = 'buy'
+                # Fallback to size-only check
+                if paradex_close_side is None:
+                    try:
+                        paradex_size = await self.paradex_client.get_account_positions()
+                    except Exception:
+                        paradex_size = Decimal(0)
+                    if paradex_size == Decimal(0):
+                        paradex_close_side = None
+                    else:
+                        # If we cannot determine side, close opposite of strategy side as a fallback
+                        paradex_close_side = 'sell' if self.side == 'buy' else 'buy'
+
+                if paradex_close_side:
+                    # Keep Paradex as limit close using current BBO; user preference targets Lighter
+                    price_para = best_bid if paradex_close_side == 'sell' else best_ask
+                    price_para = self.paradex_client.round_to_tick(price_para)
+                    await self.paradex_client.place_close_order(
+                        self.paradex_client.config.contract_id,
+                        self.quantity,
+                        price_para,
+                        paradex_close_side
+                    )
+            except Exception as e:
+                self.logger.log(f"Error placing Paradex close order: {e}", "ERROR")
+
+        finally:
+            await self.shutdown()
+
+    async def dual_side_flatten_for_cycle_end(self) -> Dict[str, Any]:
+        """Place opposite-direction orders to flatten positions at cycle end.
+        - Lighter: aggressive limit close on opposite side
+        - Paradex: market order on opposite side
+        Returns a summary dict with action details.
+        """
+        summary: Dict[str, Any] = {
+            "lighter": {"success": False},
+            "paradex": {"success": False},
+        }
+        try:
+            # Lighter close: opposite of current side, aggressive price near BBO
+            best_bid, best_ask = await self.get_bbo_price()
+            lighter_close_side = 'sell' if self.side == 'buy' else 'buy'
+            # Maker-safe limit close to avoid taking liquidity
+            lighter_price = self._maker_safe_price_for_side(
+                lighter_close_side, best_bid, best_ask, offset_ticks=self.price_offset_ticks or 1
+            )
+            self.logger.log(f"Cycle end: placing Lighter close order {lighter_close_side} qty {self.quantity} price {lighter_price}", "INFO")
+            try:
+                lr = await self.lighter_client.place_close_order(
+                    self.lighter_client.config.contract_id,
+                    self.quantity,
+                    lighter_price,
+                    lighter_close_side
+                )
+                summary["lighter"] = {
+                    "success": bool(getattr(lr, "success", False)),
+                    "order_id": getattr(lr, "order_id", None),
+                    "side": lighter_close_side,
+                    "price": str(lighter_price),
+                    "quantity": str(self.quantity),
+                }
+            except Exception as e:
+                summary["lighter"] = {"success": False, "error": str(e)}
+                self.logger.log(f"Error placing Lighter close at cycle end: {e}", "ERROR")
+
+            # Paradex close: opposite of hedge side -> opposite of current self.side
+            paradex_close_side = 'sell' if self.side == 'sell' else 'buy'
+            self.logger.log(f"Cycle end: placing Paradex market close {paradex_close_side} qty {self.quantity}", "INFO")
+            try:
+                pr = await self.paradex_client.place_market_order(
+                    contract_id=self.paradex_client.config.contract_id,
+                    quantity=self.quantity,
+                    direction=paradex_close_side
+                )
+                summary["paradex"] = {
+                    "success": bool(getattr(pr, "success", False)),
+                    "order_id": getattr(pr, "order_id", None),
+                    "side": paradex_close_side,
+                    "quantity": str(self.quantity),
+                }
+            except Exception as e:
+                summary["paradex"] = {"success": False, "error": str(e)}
+                self.logger.log(f"Error placing Paradex market close at cycle end: {e}", "ERROR")
+
+        except Exception as e:
+            self.logger.log(f"Unexpected error during cycle-end flatten: {e}", "ERROR")
+        return summary
     
     def on_lighter_order_update(self, order_update):
         """Callback for Lighter order updates via WebSocket."""
@@ -427,64 +660,150 @@ class HedgeStrategy:
             return False
 
     async def run(self):
-        """Run the hedging strategy with BBO pricing and order cancellation."""
+        """Run the hedging strategy with BBO pricing, auto-replace, and cyclical flattening.
+        If `hedge_cycle_seconds` > 0, the strategy loops cycles indefinitely until stopped.
+        """
         self.is_running = True
-        self.logger.log("Starting hedge strategy with BBO pricing", "INFO")
-        
+        self.logger.log("Starting hedge strategy with cycle support", "INFO")
+
         try:
-            # Initialize connections
+            # Initialize connections once
             self.logger.log("Initializing exchange connections", "DEBUG")
             if not await self.initialize():
                 self.logger.log("Failed to initialize. Exiting.", "ERROR")
                 return False
-            
-            # Reset retry counter
-            self.current_retry_count = 0
-            self.logger.log(f"Reset retry counter to {self.current_retry_count}", "DEBUG")
-            
-            # Place limit order on Lighter using BBO price
-            self.logger.log("Placing initial Lighter limit order", "DEBUG")
-            if not await self.place_lighter_limit_order():
-                self.logger.log("Failed to place initial Lighter order. Exiting.", "ERROR")
-                await self.shutdown()
-                return False
-            
-            # Monitor Lighter order until filled or timeout/cancel
-            self.logger.log("Starting to monitor Lighter order", "DEBUG")
-            monitor_result = await self.monitor_lighter_order()
-            self.logger.log(f"Lighter order monitoring completed with result: {monitor_result}", "DEBUG")
-            
-            if not monitor_result:
-                self.logger.log("Lighter order monitoring failed after retries. Exiting.", "ERROR")
-                # Make sure any pending orders are canceled
-                await self.cancel_lighter_order()
-                await self.shutdown()
-                return False
-            
-            # If we got here, the order was filled successfully
-            self.logger.log("Lighter order filled successfully. Placing hedge order on Paradex.", "INFO")
-            
-            # Place hedge order on Paradex (market for immediacy, fallback to aggressive limit)
-            self.logger.log("Placing hedge order on Paradex", "DEBUG")
-            hedge_result = await self.place_paradex_hedge_order()
-            self.logger.log(f"Paradex hedge order placement result: {hedge_result}", "DEBUG")
-            
-            if not hedge_result:
-                self.logger.log("Failed to place Paradex hedge order. Exiting.", "ERROR")
-                await self.shutdown()
-                return False
-            
-            self.logger.log("Hedge strategy completed successfully", "INFO")
-            await self.shutdown()
-            return True
-            
+
+            # Loop cycles until stopped
+            while self.is_running:
+                # Reset per-cycle state
+                self.current_retry_count = 0
+                self.lighter_order_id = None
+                self.paradex_order_id = None
+                self.lighter_order_filled = False
+                self.order_placement_time = None
+                self.cycle_start_time = None
+
+                # Place initial Lighter limit order
+                self.logger.log("Placing initial Lighter limit order for new cycle", "DEBUG")
+                placed = await self.place_lighter_limit_order()
+                if not placed:
+                    self.logger.log("Failed to place initial Lighter order for cycle. Retrying next cycle.", "ERROR")
+                    await asyncio.sleep(2)
+                    continue
+
+                # Monitor Lighter order until filled or timeout/cancel
+                self.logger.log("Monitoring Lighter order for fill", "DEBUG")
+                monitor_result = await self.monitor_lighter_order()
+                self.logger.log(f"Lighter order monitoring completed with result: {monitor_result}", "DEBUG")
+
+                if not monitor_result:
+                    self.logger.log("Lighter order did not fill; moving to next cycle.", "WARNING")
+                    await asyncio.sleep(1)
+                    continue
+
+                # Place hedge order on Paradex
+                self.logger.log("Placing hedge order on Paradex for cycle", "DEBUG")
+                hedge_result = await self.place_paradex_hedge_order()
+                if not hedge_result:
+                    self.logger.log("Failed to place Paradex hedge order; moving to next cycle.", "ERROR")
+                    await asyncio.sleep(1)
+                    continue
+
+                # Wait until cycle end
+                if self.hedge_cycle_seconds > 0 and self.cycle_start_time:
+                    deadline = self.cycle_start_time + self.hedge_cycle_seconds
+                    self.logger.log(f"Cycle running until {deadline} (seconds since epoch)", "DEBUG")
+                    while self.is_running and time.time() < deadline:
+                        # Optional periodic risk monitoring during cycle
+                        if self.risk_enabled:
+                            try:
+                                if await self.monitor_liquidation_risk():
+                                    self.logger.log("Risk exit triggered during cycle; stopping strategy.", "ERROR")
+                                    return False
+                            except Exception as e:
+                                self.logger.log(f"Error during in-cycle risk monitoring: {e}", "ERROR")
+                        await asyncio.sleep(1)
+
+                # Cycle end: flatten both sides
+                end_ts = time.time()
+                actions = await self.dual_side_flatten_for_cycle_end()
+
+                # Wait until all close orders are finished before starting next cycle
+                try:
+                    await self._wait_until_cleared(timeout_seconds=max(30, int(self.hedge_cycle_seconds or 30)))
+                except Exception as e:
+                    self.logger.log(f"Error while waiting for clearing: {e}", "ERROR")
+
+                # Record cycle after clearing
+                self.cycle_count += 1
+                cycle_record = {
+                    "cycle_index": self.cycle_count,
+                    "start_time": self.cycle_start_time,
+                    "end_time": end_ts,
+                    "duration_seconds": (end_ts - self.cycle_start_time) if self.cycle_start_time else None,
+                    "lighter_order_id": self.lighter_order_id,
+                    "paradex_order_id": self.paradex_order_id,
+                    "actions": actions,
+                }
+                self.cycle_history.append(cycle_record)
+                self.logger.log(f"Cycle {self.cycle_count} ended and recorded: {cycle_record}", "INFO")
+
+                # Continue to next cycle automatically
+                continue
+
         except Exception as e:
             self.logger.log(f"Error in hedge strategy: {e}", "ERROR")
             self.logger.log("Attempting to cancel any pending orders during error handling", "DEBUG")
-            # Attempt to cancel any pending orders
-            await self.cancel_lighter_order()
+            try:
+                await self.cancel_lighter_order()
+            except Exception:
+                pass
             await self.shutdown()
             return False
+
+    async def _is_lighter_cleared(self) -> bool:
+        """Check Lighter side is cleared: no active close orders and no nonzero position."""
+        try:
+            # No active close orders
+            active_orders = await self.lighter_client.get_active_orders(self.lighter_client.config.contract_id)
+            for order in active_orders:
+                if order.side == ('sell' if self.side == 'buy' else 'buy') and order.status in ['OPEN', 'PARTIALLY_FILLED']:
+                    return False
+            # No position
+            pos = await self.lighter_client.get_account_positions()
+            if abs(pos) > Decimal('0'):
+                return False
+            return True
+        except Exception:
+            return False
+
+    async def _is_paradex_cleared(self) -> bool:
+        """Check Paradex side is cleared: no active close orders and no nonzero position."""
+        try:
+            active_orders = await self.paradex_client.get_active_orders(self.paradex_client.config.contract_id)
+            for order in active_orders:
+                # cycle-end close side is opposite of current self.side
+                paradex_close_side = 'sell' if self.side == 'sell' else 'buy'
+                if order.side == paradex_close_side and order.status in ['OPEN', 'PARTIALLY_FILLED']:
+                    return False
+            pos = await self.paradex_client.get_account_positions()
+            if abs(pos) > Decimal('0'):
+                return False
+            return True
+        except Exception:
+            return False
+
+    async def _wait_until_cleared(self, timeout_seconds: int = 30) -> None:
+        """Poll until both Lighter and Paradex are cleared or timeout."""
+        start = time.time()
+        while self.is_running and (time.time() - start) < timeout_seconds:
+            lighter_ok = await self._is_lighter_cleared()
+            paradex_ok = await self._is_paradex_cleared()
+            if lighter_ok and paradex_ok:
+                self.logger.log("Both exchanges cleared. Starting next cycle.", "INFO")
+                return
+            await asyncio.sleep(1)
+        self.logger.log("Timeout waiting for clearing; proceeding to next cycle.", "WARNING")
 
 
 async def main():

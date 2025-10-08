@@ -24,6 +24,7 @@ async def main():
     parser.add_argument('--auto-cancel-enabled', action='store_true', default=True, help='启用自动取消重新挂单')
     parser.add_argument('--price-check-interval', type=int, default=5, help='价格检查间隔（秒）')
     parser.add_argument('--price-tolerance', type=float, default=0.001, help='价格容忍度（0.001 = 0.1%）')
+    parser.add_argument('--hedge-cycle-seconds', type=int, default=3600, help='对冲周期（秒），周期开始时挂单，到期取消两边订单')
     args = parser.parse_args()
 
     # 加载环境变量
@@ -48,6 +49,7 @@ async def main():
         "auto_cancel_enabled": args.auto_cancel_enabled,
         "price_check_interval": args.price_check_interval,
         "price_tolerance": args.price_tolerance,
+        "hedge_cycle_seconds": args.hedge_cycle_seconds,
     }
 
     # Exchange-specific configs as attribute objects (expected by clients)
