@@ -239,6 +239,7 @@ class ExtendedClient(BaseExchangeClient):
                     side=side,
                     time_in_force=TimeInForce.GTT,
                     post_only=True,  # Ensure MAKER orders
+                    expire_time = utc_now() + timedelta(days=1), # SDK 1 hour default
                 )
 
                 if not order_result or not order_result.data or order_result.status != 'OK':
@@ -350,7 +351,8 @@ class ExtendedClient(BaseExchangeClient):
                     price=rounded_price,
                     side=order_side,
                     time_in_force=TimeInForce.GTT,
-                    post_only=True  # Ensure MAKER orders
+                    post_only=True,  # Ensure MAKER orders
+                    expire_time = utc_now() + timedelta(days=90), # SDK 1 hour default
                 )
 
                 if not order_result or not order_result.data or order_result.status != 'OK':
