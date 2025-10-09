@@ -35,10 +35,10 @@ async def main():
         pass
 
     # 配置策略
-    # Normalize symbols for different exchanges
+    # 为不同交易所规范化符号
     base_symbol = args.ticker.split('-')[0] if '-PERP' in args.ticker else args.ticker
 
-    # Base config
+    # 基础配置
     config = {
         "ticker": args.ticker,
         "quantity": args.quantity,
@@ -52,14 +52,14 @@ async def main():
         "hedge_cycle_seconds": args.hedge_cycle_seconds,
     }
 
-    # Exchange-specific configs as attribute objects (expected by clients)
-    # lighter: uses ticker, tick_size, close_order_side
+    # 各交易所专用配置（以具名属性对象形式，便于客户端读取）
+    # lighter：使用 ticker、tick_size、close_order_side
     lighter_cfg = SimpleNamespace(
         ticker=base_symbol,
         tick_size=Decimal("0.01"),
         close_order_side=args.side
     )
-    # paradex: uses ticker, tick_size, quantity, direction, close_order_side
+    # paradex：使用 ticker、tick_size、quantity、direction、close_order_side
     paradex_direction = 'sell' if args.side == 'buy' else 'buy'
     paradex_cfg = SimpleNamespace(
         ticker=base_symbol,
