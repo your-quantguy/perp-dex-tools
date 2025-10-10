@@ -122,36 +122,52 @@ class HedgeStrategy:
             raise
     
     async def calculate_limit_price(self) -> Decimal:
-        """基于 BBO 与订单方向计算限价价格。"""
+        """基于 BBO 与订单方向计算限价价格，靠近盘口且不跨价：
+        - 买单：在买价之上偏移 1-2 tick，但不超过卖价-1tick
+        - 卖单：在卖价之下偏移 1-2 tick，但不低于买价+1tick
+        """
         best_bid, best_ask = await self.get_bbo_price()
         tick_size = self.lighter_client.config.tick_size
-        
+        ticks = max(0, int(self.price_offset_ticks or 0))
+
         if self.side == "buy":
-            # 买单：使用买价减去偏移
-            price = best_bid - (tick_size * self.price_offset_ticks)
+            target = best_bid + (tick_size * ticks)
+            # 不跨价：最多到卖价-1tick；若价差过小，则使用买价
+            upper_bound = best_ask - tick_size
+            if target >= upper_bound:
+                price = max(best_bid, upper_bound)
+            else:
+                price = target
         else:
-            # 卖单：使用卖价加上偏移
-            price = best_ask + (tick_size * self.price_offset_ticks)
-            
-        # 确保价格按最小变动单位（tick）取整
+            target = best_ask - (tick_size * ticks)
+            # 不跨价：至少到买价+1tick；若价差过小，则使用卖价
+            lower_bound = best_bid + tick_size
+            if target <= lower_bound:
+                price = min(best_ask, lower_bound)
+            else:
+                price = target
+
+        # 按 tick 对齐
         price = self.lighter_client.round_to_tick(price)
-        self.logger.log(f"{self.side} 的限价计算结果: {price}", "INFO")
+        self.logger.log(f"{self.side} 的限价计算结果: {price}（BBO: bid={best_bid}, ask={best_ask}, ticks={ticks}）", "INFO")
         return price
 
     def _maker_safe_price_for_side(self, side: str, best_bid: Decimal, best_ask: Decimal, offset_ticks: Optional[int] = None) -> Decimal:
-        """根据 BBO 为给定方向返回对做市友好的限价。
-        - 对于 `sell`：使用 `best_ask + n*tick`，避免穿越买盘
-        - 对于 `buy`： 使用 `best_bid - n*tick`，避免穿越卖盘
-        确保订单挂在盘口上，不主动吃单。
+        """根据 BBO 为给定方向返回对做市友好的限价（盘口内靠近对手盘，但不跨价）。
+        - `buy`：选 `best_bid + n*tick`，并限制不超过 `best_ask - 1*tick`
+        - `sell`：选 `best_ask - n*tick`，并限制不低于 `best_bid + 1*tick`
         """
         ticks = int(offset_ticks) if offset_ticks is not None else int(self.price_offset_ticks or 0)
-        # Ensure at least 1 tick away to avoid crossing
-        ticks = max(1, ticks)
+        ticks = max(0, ticks)
         tick_size = self.lighter_client.config.tick_size
-        if side.lower() == 'sell':
-            price = best_ask + (tick_size * ticks)
+        if side.lower() == 'buy':
+            target = best_bid + (tick_size * ticks)
+            upper_bound = best_ask - tick_size
+            price = target if target < upper_bound else max(best_bid, upper_bound)
         else:
-            price = best_bid - (tick_size * ticks)
+            target = best_ask - (tick_size * ticks)
+            lower_bound = best_bid + tick_size
+            price = target if target > lower_bound else min(best_ask, lower_bound)
         return self.lighter_client.round_to_tick(price)
     
     def _aggressive_cross_price_for_side(self, side: str, best_bid: Decimal, best_ask: Decimal) -> Decimal:
@@ -984,16 +1000,11 @@ class HedgeStrategy:
                                 )
                                 await self.cancel_lighter_order()
 
-                                # 取当前持仓方向，反向挂单平仓
-                                pos = await self.lighter_client.get_position(self.lighter_client.config.contract_id)
-                                if pos is None or pos.size == 0:
+                                # 取当前持仓方向（带符号），反向挂单平仓
+                                pos_signed = await self.lighter_client.get_account_positions()
+                                if pos_signed == Decimal(0):
                                     self.logger.log("Lighter 无持仓，无需再挂平仓单", "INFO")
                                     return
-                                # 确定平仓方向：与持仓方向相反
-                                if pos.size > 0:
-                                    lighter_close_side = "sell"
-                                else:
-                                    lighter_close_side = "buy"
 
                                 best_bid, best_ask = await self.get_bbo_price()
                                 new_price = self._maker_safe_price_for_side(
@@ -1004,7 +1015,7 @@ class HedgeStrategy:
                                 )
                                 lr = await self.lighter_client.place_close_order(
                                     self.lighter_client.config.contract_id,
-                                    abs(pos.size),  # 用实际持仓数量
+                                    abs(pos_signed),  # 用实际持仓数量（绝对值）
                                     new_price,
                                     lighter_close_side,
                                 )
@@ -1019,11 +1030,37 @@ class HedgeStrategy:
                             except Exception as e:
                                 self.logger.log(f"周期结束平仓监控时发生错误: {e}", "ERROR")
                         else:
-                            # 达到最大重试或未启用自动替换，仍继续阻塞等待（不进入下个周期）
-                            self.logger.log(
-                                "周期结束平仓：达到最大重试次数或未启用自动替换；继续等待清算。",
-                                "WARNING",
-                            )
+                            # 达到最大重试或未启用自动替换：触发激进跨价在 Lighter 平仓，避免无限等待
+                            try:
+                                self.logger.log(
+                                    "周期结束平仓：达到最大重试或未启用自动替换；改用激进跨价在 Lighter 平仓。",
+                                    "WARNING",
+                                )
+                                # 获取当前 Lighter 持仓与 BBO
+                                pos_signed = await self.lighter_client.get_account_positions()
+                                if pos_signed == Decimal(0):
+                                    self.logger.log("Lighter 当前无持仓，无需激进平仓。", "INFO")
+                                else:
+                                    lighter_close_side = "sell" if pos_signed > 0 else "buy"
+                                    best_bid, best_ask = await self.get_bbo_price()
+                                    cross_price = self._aggressive_cross_price_for_side(
+                                        lighter_close_side, best_bid, best_ask
+                                    )
+                                    lr = await self.lighter_client.place_close_order(
+                                        self.lighter_client.config.contract_id,
+                                        abs(pos_signed),
+                                        cross_price,
+                                        lighter_close_side,
+                                    )
+                                    self.lighter_order_id = getattr(lr, "order_id", None)
+                                    self.order_placement_time = time.time()
+                                    self.logger.log(
+                                        f"周期结束平仓：已使用激进跨价在 Lighter 平仓 {lighter_close_side} 数量 {abs(pos_signed)} 价格 {cross_price} 订单 {self.lighter_order_id}",
+                                        "INFO",
+                                    )
+                            except Exception as e:
+                                self.logger.log(f"周期结束平仓：激进跨价下单失败: {e}", "ERROR")
+                            # 继续循环等待 Lighter 清算；清算完成后 run() 会触发 Paradex 市价平仓
 
                 await asyncio.sleep(1)
             except Exception as e:
