@@ -8,7 +8,7 @@
 
 ## Multi-Exchange Trading Bot
 
-A modular trading bot that supports multiple exchanges including EdgeX, Backpack, Paradex, Aster, Lighter, and GRVT. The bot implements an automated strategy that places orders and automatically closes them at a profit.
+A modular trading bot that supports multiple exchanges including EdgeX, Backpack, Paradex, Aster, Lighter, GRVT, and Extended. The bot implements an automated strategy that places orders and automatically closes them at a profit.
 
 ## Referral Links (Enjoy fee rebates and benefits)
 
@@ -16,19 +16,24 @@ A modular trading bot that supports multiple exchanges including EdgeX, Backpack
 
 Instant VIP 1 Trading Fees; 10% Fee Rebate; 10% Bonus Points
 
-#### Backpack Exchange: [https://backpack.exchange/join/quant](https://backpack.exchange/join/quant)
+#### Backpack: [https://backpack.exchange/join/quant](https://backpack.exchange/join/quant)
 
 You will get 35% fee rebates on all your trading fees
 
-#### Paradex Exchange: [https://app.paradex.trade/r/quant](https://app.paradex.trade/r/quant)
+#### Paradex: [https://app.paradex.trade/r/quant](https://app.paradex.trade/r/quant)
 
 You will get 10% taker fee discount rebates and potential future benefits
 
-#### Aster Exchange: [https://www.asterdex.com/zh-CN/referral/5191B1](https://www.asterdex.com/zh-CN/referral/5191B1)
+#### Aster: [https://www.asterdex.com/zh-CN/referral/5191B1](https://www.asterdex.com/zh-CN/referral/5191B1)
 
 You will get 30% fee rebates and points boost
 
-#### GRVT Exchange: [https://grvt.io/exchange/sign-up?ref=QUANT](https://grvt.io/exchange/sign-up?ref=QUANT)
+#### grvt: [https://grvt.io/exchange/sign-up?ref=QUANT](https://grvt.io/exchange/sign-up?ref=QUANT)
+You will get 1.3x points boost; rebates (auto rebates system is expected to be launched in mid-Oct); access to private trading competition
+
+#### Extended: [https://app.extended.exchange/join/QUANT](https://app.extended.exchange/join/QUANT)
+10% fee discount; points boost (black box, but "you will get more points from affiliate referral program than using another account to refer yourself" quoted from the official documentation from Extended); access to private trading competition
+
 
 ## Installation
 
@@ -235,6 +240,43 @@ BTC:
 python runbot.py --exchange grvt --ticker BTC --quantity 0.05 --take-profit 0.02 --max-orders 40 --wait-time 450
 ```
 
+### Extended Exchange:
+
+ETH:
+
+```bash
+python runbot.py --exchange extended --ticker ETH --quantity 0.1 --take-profit 0 --max-orders 40 --wait-time 450 --grid-step 0.01
+```
+
+## 🆕 Hedge Mode
+
+The new Hedge Mode (`hedge_mode.py`) is an trading strategy that reduces risk by simultaneously hedging trades across two exchanges:
+
+### How Hedge Mode Works
+
+1. **Opening Phase**: Place maker order at selected exchange (e.g., Backpack)
+2. **Hedging Phase**: After order fills, immediately place market order at Lighter to hedge
+3. **Closing Phase**: Place another maker order at selected exchange to close position
+4. **Hedge Closing**: Place market order at Lighter to close hedge position
+
+### Hedge Mode Usage Examples
+
+```bash
+# Run BTC hedge mode
+python hedge_mode.py --exchange backpack --ticker BTC --size 0.05 --iter 20
+
+# Run ETH hedge mode
+python hedge_mode.py --exchange backpack --ticker ETH --size 0.1 --iter 20
+```
+
+### Hedge Mode Parameters
+
+- `--exchange`: Primary exchange (currently supports 'backpack')
+- `--ticker`: Trading pair symbol (e.g., BTC, ETH)
+- `--size`: Order quantity per trade
+- `--iter`: Number of trading cycles
+- `--fill-timeout`: Maker order fill timeout in seconds (default: 5)
+
 ## Configuration
 
 ### Environment Variables
@@ -282,6 +324,13 @@ python runbot.py --exchange grvt --ticker BTC --quantity 0.05 --take-profit 0.02
 - `GRVT_PRIVATE_KEY`: Your GRVT private key
 - `GRVT_API_KEY`: Your GRVT API key
 
+#### Extended Configuration
+
+- `EXTENDED_API_KEY`: Your Extended API key
+- `EXTENDED_STARK_KEY_PUBLIC`: Your Stark public key
+- `EXTENDED_STARK_KEY_PRIVATE`: Your Stark private key
+- `EXTENDED_VAULT`: Your Extended Vault ID
+
 **How to get LIGHTER_ACCOUNT_INDEX**:
 
 1. Add your wallet address to the end of the following URL:
@@ -296,7 +345,7 @@ python runbot.py --exchange grvt --ticker BTC --quantity 0.05 --take-profit 0.02
 
 ### Command Line Arguments
 
-- `--exchange`: Exchange to use: 'edgex', 'backpack', 'paradex', 'aster', 'lighter', or 'grvt' (default: edgex)
+- `--exchange`: Exchange to use: 'edgex', 'backpack', 'paradex', 'aster', 'lighter', 'grvt', or 'extended' (default: edgex)
 - `--ticker`: Base asset symbol (e.g., ETH, BTC, SOL). Contract ID is auto-resolved.
 - `--quantity`: Order quantity (default: 0.1)
 - `--take-profit`: Take profit percent (e.g., 0.02 means 0.02%)
