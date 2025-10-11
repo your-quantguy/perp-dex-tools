@@ -9,6 +9,7 @@ import logging
 from pathlib import Path
 import sys
 import dotenv
+import os
 from decimal import Decimal
 from trading_bot import TradingBot, TradingConfig
 from exchanges import ExchangeFactory
@@ -19,35 +20,48 @@ def parse_arguments():
     parser = argparse.ArgumentParser(description='Modular Trading Bot - Supports multiple exchanges')
 
     # Exchange selection
-    parser.add_argument('--exchange', type=str, default='edgex',
+    parser.add_argument('--exchange', type=str,
+                        default=os.environ.get('EXCHANGE', 'edgex'),
                         choices=ExchangeFactory.get_supported_exchanges(),
                         help='Exchange to use (default: edgex). '
                              f'Available: {", ".join(ExchangeFactory.get_supported_exchanges())}')
 
     # Trading parameters
-    parser.add_argument('--ticker', type=str, default='ETH',
+    parser.add_argument('--ticker', type=str,
+                        default=os.environ.get('TICKER', 'ETH'),
                         help='Ticker (default: ETH)')
-    parser.add_argument('--quantity', type=Decimal, default=Decimal(0.1),
+    parser.add_argument('--quantity', type=Decimal,
+                        default=Decimal(os.environ.get('QUANTITY', '0.1')),
                         help='Order quantity (default: 0.1)')
-    parser.add_argument('--take-profit', type=Decimal, default=Decimal(0.02),
+    parser.add_argument('--take-profit', type=Decimal,
+                        default=Decimal(os.environ.get('TAKE_PROFIT', '0.02')),
                         help='Take profit in USDT (default: 0.02)')
-    parser.add_argument('--direction', type=str, default='buy', choices=['buy', 'sell'],
+    parser.add_argument('--direction', type=str,
+                        default=os.environ.get('DIRECTION', 'buy'),
+                        choices=['buy', 'sell'],
                         help='Direction of the bot (default: buy)')
-    parser.add_argument('--max-orders', type=int, default=40,
+    parser.add_argument('--max-orders', type=int,
+                        default=int(os.environ.get('MAX_ORDERS', '40')),
                         help='Maximum number of active orders (default: 40)')
-    parser.add_argument('--wait-time', type=int, default=450,
+    parser.add_argument('--wait-time', type=int,
+                        default=int(os.environ.get('WAIT_TIME', '450')),
                         help='Wait time between orders in seconds (default: 450)')
-    parser.add_argument('--env-file', type=str, default=".env",
-                        help=".env file path (default: .env)")
-    parser.add_argument('--grid-step', type=str, default='-100',
+    parser.add_argument('--env-file', type=str,
+                        default=os.environ.get('ENV_FILE', '.env'),
+                        help='.env file path (default: .env)')
+    parser.add_argument('--grid-step', type=str,
+                        default=os.environ.get('GRID_STEP', '-100'),
                         help='The minimum distance in percentage to the next close order price (default: -100)')
-    parser.add_argument('--stop-price', type=Decimal, default=-1,
+    parser.add_argument('--stop-price', type=Decimal,
+                        default=Decimal(os.environ.get('STOP_PRICE', '-1')),
                         help='Price to stop trading and exit. Buy: exits if price >= stop-price.'
                         'Sell: exits if price <= stop-price. (default: -1, no stop)')
-    parser.add_argument('--pause-price', type=Decimal, default=-1,
+    parser.add_argument('--pause-price', type=Decimal,
+                        default=Decimal(os.environ.get('PAUSE_PRICE', '-1')),
                         help='Pause trading and wait. Buy: pause if price >= pause-price.'
                         'Sell: pause if price <= pause-price. (default: -1, no pause)')
     parser.add_argument('--boost', action='store_true',
+                        default=os.environ.get('BOOST', 'False').lower() == 'true',
                         help='Use the Boost mode for volume boosting')
 
     return parser.parse_args()
@@ -85,6 +99,15 @@ def setup_logging(log_level: str):
 
 async def main():
     """Main entry point."""
+    # Load the .env file first
+    env_file = os.environ.get('ENV_FILE', '.env')
+    env_path = Path(env_file)
+    if not env_path.exists():
+        print(f"Env file not find: {env_path.resolve()}")
+        sys.exit(1)
+    dotenv.load_dotenv(env_file)
+
+    # Re-analysis parameters
     args = parse_arguments()
 
     # Setup logging first
@@ -95,12 +118,6 @@ async def main():
         print(f"Error: --boost can only be used when --exchange is 'aster' or 'backpack'. "
               f"Current exchange: {args.exchange}")
         sys.exit(1)
-
-    env_path = Path(args.env_file)
-    if not env_path.exists():
-        print(f"Env file not find: {env_path.resolve()}")
-        sys.exit(1)
-    dotenv.load_dotenv(args.env_file)
 
     # Create configuration
     config = TradingConfig(
