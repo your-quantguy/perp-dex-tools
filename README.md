@@ -128,6 +128,17 @@ Python 版本要求（最佳选项是 Python 3.10 - 3.12）：
    pip install -r para_requirements.txt
    ```
 
+   **apex 用户**：如果您想使用 apex 交易所，需要额外安装 apex 专用依赖：
+   激活虚拟环境（每次使用脚本时，都需要激活虚拟环境）：
+
+   ```bash
+   source env/bin/activate  # Windows: env\Scripts\activate
+   ```
+
+   ```bash
+   pip install apexomni
+   ```
+
 4. **设置环境变量**：
    在项目根目录创建`.env`文件，并使用 env_example.txt 作为样本，修改为你的 api 密匙。
 
