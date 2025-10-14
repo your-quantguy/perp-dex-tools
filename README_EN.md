@@ -107,6 +107,20 @@ You will get 1.3x points boost; rebates (auto rebates system is expected to be l
    pip install -r para_requirements.txt
    ```
 
+   **Apex Users**: If you want to use Apex exchange, you need to install Apex dependencies:
+
+   First, make sure you are not currently in any virtual environment:
+
+   ```bash
+   source env/bin/activate  # Windows: env\Scripts\activate
+   ```
+
+   Install Apex dependencies
+
+   ```bash
+   pip install -r apex_requirements.txt
+   ```
+
 4. **Set up environment variables**:
    Create a `.env` file in the project root directory and use env_example.txt as a template to modify with your API keys.
 

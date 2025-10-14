@@ -1,0 +1,22 @@
+
+# Apex's SDK couldn't handle requirements properly, so install the required packages manually
+# ref: https://github.com/ApeX-Protocol/apexpro-openapi/pull/28
+
+websocket-client
+websockets
+dateparser==1.0.0
+ecdsa==0.16.0
+eth_keys
+eth-account==0.13.7
+mpmath
+pytest>=4.4.0,<5.0.0
+requests-mock==1.6.0
+requests>=2.32.3,<3.0.0
+setuptools>=50.3.2
+sympy==1.6
+tox==3.13.2
+web3==6.0.0
+numpy
+
+# Apex Python SDK
+apexomni

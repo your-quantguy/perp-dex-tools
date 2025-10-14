@@ -17,6 +17,7 @@ class ExchangeFactory:
         'lighter': 'exchanges.lighter.LighterClient',
         'grvt': 'exchanges.grvt.GrvtClient',
         'extended': 'exchanges.extended.ExtendedClient',
+        'apex': 'exchanges.apex.ApexClient',
     }
 
     @classmethod

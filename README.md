@@ -136,7 +136,7 @@ Python 版本要求（最佳选项是 Python 3.10 - 3.12）：
    ```
 
    ```bash
-   pip install apexomni
+   pip install -r apex_requirements.txt
    ```
 
 4. **设置环境变量**：

@@ -1,3 +1,4 @@
+# coding: utf-8
 """
 Apex exchange client implementation.
 """
@@ -10,7 +11,7 @@ import traceback
 import types
 from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
-from apexomni import constants as apex_constants
+from apexomni import constants as apex_constants, FailedRequestError
 from apexomni._websocket_stream import _ApexWebSocketManager, PRIVATE_WSS
 from apexomni.http_private_sign import HttpPrivateSign
 from apexomni.websocket_api import WebSocket as ApexWebSocketClient
@@ -19,7 +20,7 @@ from .base import BaseExchangeClient, OrderResult, OrderInfo, query_retry
 from helpers.logger import TradingLogger
 
 
-class ApexExchangeClient(BaseExchangeClient):
+class ApexClient(BaseExchangeClient):
     """Apex exchange client implementation"""
 
     def __init__(self, config: Dict[str, any]):
@@ -31,7 +32,7 @@ class ApexExchangeClient(BaseExchangeClient):
         self.api_key_passphrase = os.getenv('APEX_API_KEY_PASSPHRASE')
         self.api_key_secret = os.getenv('APEX_API_KEY_SECRET')
         self.omni_key_seed = os.getenv('APEX_OMNI_KEY_SEED')
-        self.api_key_credentials={
+        self.api_key_credentials = {
             'key': self.api_key, 'secret': self.api_key_secret,
             'passphrase': self.api_key_passphrase
         }
@@ -54,6 +55,7 @@ class ApexExchangeClient(BaseExchangeClient):
         self._initialize_apex_clients()
 
         self._order_update_handler = None
+        self.account_handler = None
 
         # --- reconnection state ---
         self._ws_task: Optional[asyncio.Task] = None
@@ -119,6 +121,7 @@ class ApexExchangeClient(BaseExchangeClient):
                 # connect
                 self.ws_client.ws_private = _ApexWebSocketManager(**self.ws_client.kwargs)
                 self.ws_client.ws_private._connect(self.ws_client.endpoint + PRIVATE_WSS)
+                self.ws_client.account_info_stream_v3(self.account_handler)
                 self.logger.log("[WS] private connected", "INFO")
                 backoff = 1.0
 
@@ -133,7 +136,7 @@ class ApexExchangeClient(BaseExchangeClient):
                     break
 
                 self.logger.log(
-                    "[WS] disconnected; attempting to reconnect¡­", "WARNING"
+                    "[WS] disconnected; attempting to reconnect...", "WARNING"
                 )
             except Exception as e:
                 self.logger.log(f"[WS] connect error: {e}", "ERROR")
@@ -196,14 +199,19 @@ class ApexExchangeClient(BaseExchangeClient):
 
                 # Check if this is a trade-event with ORDER_UPDATE
                 content = message.get("contents", {})
-                topic = content.get("topic", "")
+                topic = message.get("topic", "")
                 if topic != "ws_zk_accounts_v3":
                     return
                 # Extract order data from the nested structure
                 orders = content.get('orders', [])
 
+                # on websocket starting, Apex will send the historical filled orders, could be confusing
+                if len(orders) > 1 and not content.get('fills'):
+                    return
+
                 if not orders:
                     return
+
                 order = orders[0]  # Get the first order
                 if order.get('symbol') != self.config.contract_id:
                     return
@@ -245,7 +253,7 @@ class ApexExchangeClient(BaseExchangeClient):
                 self.logger.log(f"Traceback: {traceback.format_exc()}", "ERROR")
 
         try:
-            self.ws_client.account_info_stream_v3(order_update_handler)
+            self.account_handler = order_update_handler
         except Exception as e:
             self.logger.log(f"Could not add trade-event handler: {e}", "ERROR")
 
@@ -254,7 +262,7 @@ class ApexExchangeClient(BaseExchangeClient):
     # ---------------------------
 
     @query_retry(default_return=(0, 0))
-    def fetch_bbo_prices(self, contract_id: str) -> Tuple[Decimal, Decimal]:
+    async def fetch_bbo_prices(self, contract_id: str) -> Tuple[Decimal, Decimal]:
         """Fetch best bid and ask price using official SDK"""
         order_book = self.rest_client.depth_v3(symbol=contract_id)
         order_book_data = order_book['data']
@@ -269,9 +277,9 @@ class ApexExchangeClient(BaseExchangeClient):
         best_ask = Decimal(min(asks, key=lambda x: Decimal(x[0]))[0])
         return best_bid, best_ask
 
-    def get_order_price(self, direction: str) -> Decimal:
+    async def get_order_price(self, direction: str) -> Decimal:
         """Get the price of an order with Apex using official SDK."""
-        best_bid, best_ask = self.fetch_bbo_prices(self.config.contract_id)
+        best_bid, best_ask = await self.fetch_bbo_prices(self.config.contract_id)
         if best_bid <= 0 or best_ask <= 0:
             self.logger.log("Invalid bid/ask prices", "ERROR")
             raise ValueError("Invalid bid/ask prices")
@@ -291,7 +299,7 @@ class ApexExchangeClient(BaseExchangeClient):
 
         while retry_count < max_retries:
             try:
-                best_bid, best_ask = self.fetch_bbo_prices(contract_id)
+                best_bid, best_ask = await self.fetch_bbo_prices(contract_id)
 
                 if best_bid <= 0 or best_ask <= 0:
                     return OrderResult(success=False, error_message='Invalid bid/ask prices')
@@ -312,11 +320,15 @@ class ApexExchangeClient(BaseExchangeClient):
                     price=str(self.round_to_tick(order_price)),
                     side=side.upper(),
                     type='LIMIT',
-                    timestampSeconds=time.time()
+                    timestampSeconds=time.time(),
+                    timeInForce='GOOD_TIL_CANCEL',
                 )
 
+                if not order_result or 'data' not in order_result:
+                    return OrderResult(success=False, error_message='Failed to place order')
+
                 # Extract order ID from response
-                order_id = order_result.get('id')
+                order_id = order_result['data'].get('id')
                 if not order_id:
                     return OrderResult(success=False, error_message='No order ID in response')
 
@@ -371,7 +383,7 @@ class ApexExchangeClient(BaseExchangeClient):
 
         while retry_count < max_retries:
             try:
-                best_bid, best_ask = self.fetch_bbo_prices(contract_id)
+                best_bid, best_ask = await self.fetch_bbo_prices(contract_id)
 
                 if best_bid <= 0 or best_ask <= 0:
                     return OrderResult(success=False, error_message='Invalid bid/ask prices')
@@ -396,11 +408,15 @@ class ApexExchangeClient(BaseExchangeClient):
                     price=str(adjusted_price),
                     side=side.upper(),
                     type='LIMIT',
-                    timestampSeconds=time.time()
+                    timestampSeconds=time.time(),
+                    timeInForce='GOOD_TIL_CANCEL',
                 )
 
+                if not order_result or 'data' not in order_result:
+                    return OrderResult(success=False, error_message='Failed to place order')
+
                 # Extract order ID from response
-                order_id = order_result.get('id')
+                order_id = order_result['data'].get('id')
                 if not order_id:
                     return OrderResult(success=False, error_message='No order ID in response')
 
@@ -457,18 +473,23 @@ class ApexExchangeClient(BaseExchangeClient):
                 return OrderResult(success=False, error_message='Failed to cancel order')
 
             return OrderResult(success=True)
-
+        except FailedRequestError as e:
+            # Apex's API return non-JSON response when trying to cancel a filled order
+            if 'Could not decode JSON' in e.message:
+                return OrderResult(success=False, error_message='Order has been filled')
+            else:
+                return OrderResult(success=False, error_message=e.message)
         except Exception as e:
             return OrderResult(success=False, error_message=str(e))
 
     @query_retry()
     async def get_order_info(self, order_id: str) -> Optional[OrderInfo]:
         """Get order information from Apex using official SDK."""
-        order_data = self.rest_client.get_order(id=order_id)
-
-        if not order_data:
+        order_result = self.rest_client.get_order_v3(id=order_id)
+        if not order_result or 'data' not in order_result:
             return None
 
+        order_data = order_result['data']
         return OrderInfo(
             order_id=order_data.get('id', ''),
             side=order_data.get('side', '').lower(),
@@ -539,7 +560,11 @@ class ApexExchangeClient(BaseExchangeClient):
             self.logger.log("Ticker is empty", "ERROR")
             raise ValueError("Ticker is empty")
 
-        data = self.rest_client.configs_v3(symbol=ticker)
+        response = self.rest_client.configs_v3(symbol=ticker)
+        data = response.get('data', {})
+        if not data:
+            self.logger.log("Failed to get metadata", "ERROR")
+            raise ValueError("Failed to get metadata")
 
         contract_list = data.get('contractConfig', {}).get('perpetualContract', [])
         if not contract_list:
