@@ -21,10 +21,6 @@ from exchanges.backpack import BackpackClient
 import websockets
 from datetime import datetime
 import pytz
-import dotenv
-
-dotenv.load_dotenv()
-
 
 class Config:
     """Simple config class to wrap dictionary for Backpack client."""

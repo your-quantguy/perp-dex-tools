@@ -21,9 +21,6 @@ from exchanges.extended import ExtendedClient
 import websockets
 from datetime import datetime
 import pytz
-import dotenv
-
-dotenv.load_dotenv()
 
 
 class Config:

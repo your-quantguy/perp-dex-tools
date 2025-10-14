@@ -21,7 +21,8 @@ import asyncio
 import sys
 import argparse
 from decimal import Decimal
-
+from pathlib import Path
+import dotenv
 
 def parse_arguments():
     """Parse command line arguments."""
@@ -45,6 +46,8 @@ Examples:
                         help='Number of iterations to run')
     parser.add_argument('--fill-timeout', type=int, default=5,
                         help='Timeout in seconds for maker order fills (default: 5)')
+    parser.add_argument('--env-file', type=str, default=".env",
+                        help=".env file path (default: .env)")
     
     return parser.parse_args()
 
@@ -77,6 +80,12 @@ def get_hedge_bot_class(exchange):
 async def main():
     """Main entry point that creates and runs the appropriate hedge bot."""
     args = parse_arguments()
+
+    env_path = Path(args.env_file)
+    if not env_path.exists():
+        print(f"Env file not find: {env_path.resolve()}")
+        sys.exit(1)
+    dotenv.load_dotenv(args.env_file)
     
     # Validate exchange
     validate_exchange(args.exchange)
