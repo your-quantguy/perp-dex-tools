@@ -348,7 +348,7 @@ class LighterClient(BaseExchangeClient):
         order_result = await self.place_limit_order(contract_id, quantity, price, side)
 
         # wait for 5 seconds to ensure order is placed
-        await asyncio.sleep(5)
+        await asyncio.sleep(1)
         if order_result.success:
             return OrderResult(
                 success=True,
