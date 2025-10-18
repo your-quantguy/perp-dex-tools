@@ -13,7 +13,7 @@ from typing import Dict, Any, List, Optional, Tuple
 from cryptography.hazmat.primitives.asymmetric import ed25519
 import websockets
 from bpx.public import Public
-from bpx.account import Account
+from .bp_client import Account
 from bpx.constants.enums import OrderTypeEnum, TimeInForceEnum
 
 from .base import BaseExchangeClient, OrderResult, OrderInfo, query_retry
@@ -53,7 +53,7 @@ class BackpackWebSocketManager:
         """Connect to Backpack WebSocket."""
         while True:
             try:
-                self.logger.log(f"Connecting to Backpack WebSocket", "INFO")
+                self.logger.log("Connecting to Backpack WebSocket", "INFO")
                 self.websocket = await websockets.connect(self.ws_url)
                 self.running = True
 

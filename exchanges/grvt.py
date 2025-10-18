@@ -258,7 +258,10 @@ class GrvtClient(BaseExchangeClient):
             side=side,
             amount=quantity,
             price=price,
-            params={'post_only': True}
+            params={
+                'post_only': True,
+                'order_duration_secs': 30 * 86400 - 1, # GRVT SDK: signature expired cap is 30 days (default 1 day)
+            }
         )
         if not order_result:
             raise Exception(f"[OPEN] Error placing order")

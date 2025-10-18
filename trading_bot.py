@@ -138,9 +138,14 @@ class TradingBot:
 
                         if self.order_filled_amount > 0:
                             self.logger.log_transaction(order_id, side, self.order_filled_amount, message.get('price'), status)
-
-                    self.logger.log(f"[{order_type}] [{order_id}] {status} "
-                                    f"{message.get('size')} @ {message.get('price')}", "INFO")
+                            
+                    # PATCH
+                    if self.config.exchange == "extended":
+                        self.logger.log(f"[{order_type}] [{order_id}] {status} "
+                                        f"{Decimal(message.get('size')) - filled_size} @ {message.get('price')}", "INFO")
+                    else:
+                        self.logger.log(f"[{order_type}] [{order_id}] {status} "
+                                        f"{message.get('size')} @ {message.get('price')}", "INFO")
                 elif status == "PARTIALLY_FILLED":
                     self.logger.log(f"[{order_type}] [{order_id}] {status} "
                                     f"{filled_size} @ {message.get('price')}", "INFO")
@@ -275,13 +280,14 @@ class TradingBot:
                 should_wait(self.config.direction, new_order_price, order_result.price)
                 and current_order_status == "OPEN"
             ):
-                self.logger.log(f"[OPEN] [{order_id}] Waiting for order to be filled", "INFO")
+                self.logger.log(f"[OPEN] [{order_id}] Waiting for order to be filled @ {order_result.price}", "INFO")
                 await asyncio.sleep(5)
                 if self.config.exchange == "lighter":
                     current_order_status = self.exchange_client.current_order.status
                 else:
                     order_info = await self.exchange_client.get_order_info(order_id)
-                    current_order_status = order_info.status
+                    if order_info is not None:
+                        current_order_status = order_info.status
                 new_order_price = await self.exchange_client.get_order_price(self.config.direction)
 
             self.order_canceled_event.clear()
@@ -311,7 +317,7 @@ class TradingBot:
                     self.order_canceled_event.set()
                     self.logger.log(f"[CLOSE] Error canceling order {order_id}: {e}", "ERROR")
 
-                if self.config.exchange == "backpack":
+                if self.config.exchange == "backpack" or self.config.exchange == "extended":
                     self.order_filled_amount = cancel_result.filled_size
                 else:
                     # Wait for cancel event or timeout
