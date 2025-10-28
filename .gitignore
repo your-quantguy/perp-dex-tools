@@ -196,3 +196,14 @@ cython_debug/
 
 # pyenv settings
 .python-version
+
+# sh script
+start.sh
+stop.sh
+start*.sh
+stop*.sh
+
+# Claude
+.claude/
+CLAUDE.md
+claude-docs/
