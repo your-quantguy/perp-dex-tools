@@ -290,15 +290,19 @@ python hedge_mode.py --exchange apex --ticker BTC --size 0.05 --iter 20
 
 # Run BTC hedge mode with GRVT
 python hedge_mode.py --exchange grvt --ticker BTC --size 0.05 --iter 20
+
+# Run BTC hedge mode with edgeX
+python hedge_mode.py --exchange edgex --ticker BTC --size 0.001 --iter 20
 ```
 
 ### Hedge Mode Parameters
 
-- `--exchange`: Primary exchange (supports 'backpack', 'extended', 'apex', 'grvt')
+- `--exchange`: Primary exchange (supports 'backpack', 'extended', 'apex', 'grvt', 'edgex')
 - `--ticker`: Trading pair symbol (e.g., BTC, ETH)
 - `--size`: Order quantity per trade
 - `--iter`: Number of trading cycles
 - `--fill-timeout`: Maker order fill timeout in seconds (default: 5)
+- `--sleep`: Sleep time in seconds after each step (default: 0)
 
 ## Configuration
 

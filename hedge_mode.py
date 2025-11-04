@@ -13,6 +13,7 @@ Supported exchanges:
     - extended: Uses HedgeBot from hedge_mode_ext.py (Extended + Lighter)
     - apex: Uses HedgeBot from hedge_mode_apex.py (Apex + Lighter)
     - grvt: Uses HedgeBot from hedge_mode_grvt.py (GRVT + Lighter)
+    - edgex: Uses HedgeBot from hedge_mode_edgex.py (edgeX + Lighter)
 
 Cross-platform compatibility:
     - Works on Linux, macOS, and Windows
@@ -37,11 +38,12 @@ Examples:
     python hedge_mode.py --exchange extended --ticker ETH --size 0.1 --iter 5
     python hedge_mode.py --exchange apex --ticker BTC --size 0.002 --iter 10
     python hedge_mode.py --exchange grvt --ticker BTC --size 0.05 --iter 10
+    python hedge_mode.py --exchange edgex --ticker BTC --size 0.001 --iter 20
         """
     )
     
     parser.add_argument('--exchange', type=str, required=True,
-                        help='Exchange to use (backpack, extended, apex, or grvt)')
+                        help='Exchange to use (backpack, extended, apex, grvt, or edgex)')
     parser.add_argument('--ticker', type=str, default='BTC',
                         help='Ticker symbol (default: BTC)')
     parser.add_argument('--size', type=str, required=True,
@@ -50,6 +52,8 @@ Examples:
                         help='Number of iterations to run')
     parser.add_argument('--fill-timeout', type=int, default=5,
                         help='Timeout in seconds for maker order fills (default: 5)')
+    parser.add_argument('--sleep', type=int, default=0,
+                        help='Sleep time in seconds after each step (default: 0)')
     parser.add_argument('--env-file', type=str, default=".env",
                         help=".env file path (default: .env)")
     
@@ -58,7 +62,7 @@ Examples:
 
 def validate_exchange(exchange):
     """Validate that the exchange is supported."""
-    supported_exchanges = ['backpack', 'extended', 'apex', 'grvt']
+    supported_exchanges = ['backpack', 'extended', 'apex', 'grvt', 'edgex']
     if exchange.lower() not in supported_exchanges:
         print(f"Error: Unsupported exchange '{exchange}'")
         print(f"Supported exchanges: {', '.join(supported_exchanges)}")
@@ -79,6 +83,9 @@ def get_hedge_bot_class(exchange):
             return HedgeBot
         elif exchange.lower() == 'grvt':
             from hedge.hedge_mode_grvt import HedgeBot
+            return HedgeBot
+        elif exchange.lower() == 'edgex':
+            from hedge.hedge_mode_edgex import HedgeBot
             return HedgeBot
         else:
             raise ValueError(f"Unsupported exchange: {exchange}")
@@ -117,7 +124,8 @@ async def main():
             ticker=args.ticker.upper(),
             order_quantity=Decimal(args.size),
             fill_timeout=args.fill_timeout,
-            iterations=args.iter
+            iterations=args.iter,
+            sleep_time=args.sleep
         )
         
         # Run the bot

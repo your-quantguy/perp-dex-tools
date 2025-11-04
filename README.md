@@ -316,15 +316,19 @@ python hedge_mode.py --exchange apex --ticker BTC --size 0.05 --iter 20
 
 # 运行 BTC 对冲模式（GRVT）
 python hedge_mode.py --exchange grvt --ticker BTC --size 0.05 --iter 20
+
+# 运行 BTC 对冲模式（edgeX）
+python hedge_mode.py --exchange edgex --ticker BTC --size 0.001 --iter 20
 ```
 
 ### 对冲模式参数
 
-- `--exchange`: 主要交易所（支持 'backpack', 'extended', 'apex', 'grvt'）
+- `--exchange`: 主要交易所（支持 'backpack', 'extended', 'apex', 'grvt', 'edgex'）
 - `--ticker`: 交易对符号（如 BTC, ETH）
 - `--size`: 每笔订单数量
 - `--iter`: 交易循环次数
 - `--fill-timeout`: maker 订单填充超时时间（秒，默认 5）
+- `--sleep`: 每一笔交易之后的暂停时间，增加持仓时间（秒，默认 0）
 
 ## 配置
 

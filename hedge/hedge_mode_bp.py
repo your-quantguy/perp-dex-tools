@@ -32,12 +32,13 @@ class Config:
 class HedgeBot:
     """Trading bot that places post-only orders on Backpack and hedges with market orders on Lighter."""
 
-    def __init__(self, ticker: str, order_quantity: Decimal, fill_timeout: int = 5, iterations: int = 20):
+    def __init__(self, ticker: str, order_quantity: Decimal, fill_timeout: int = 5, iterations: int = 20, sleep_time: int = 0):
         self.ticker = ticker
         self.order_quantity = order_quantity
         self.fill_timeout = fill_timeout
         self.lighter_order_filled = False
         self.iterations = iterations
+        self.sleep_time = sleep_time
         self.backpack_position = Decimal('0')
         self.lighter_position = Decimal('0')
         self.current_order = {}
@@ -316,9 +317,9 @@ class HedgeBot:
             raise Exception("Cannot calculate order price - missing order book data")
 
         if is_ask:
-            order_price = best_bid[0] + Decimal('0.1')
+            order_price = best_bid[0] + self.tick_size
         else:
-            order_price = best_ask[0] - Decimal('0.1')
+            order_price = best_ask[0] - self.tick_size
 
         return order_price
 
@@ -545,7 +546,7 @@ class HedgeBot:
         self.logger.info("✅ Backpack client initialized successfully")
         return self.backpack_client
 
-    def get_lighter_market_config(self) -> Tuple[int, int, int]:
+    def get_lighter_market_config(self) -> Tuple[int, int, int, Decimal]:
         """Get Lighter market configuration."""
         url = f"{self.lighter_base_url}/api/v1/orderBooks"
         headers = {"accept": "application/json"}
@@ -564,10 +565,12 @@ class HedgeBot:
 
             for market in data["order_books"]:
                 if market["symbol"] == self.ticker:
-                    return (market["market_id"],
-                            pow(10, market["supported_size_decimals"]),
-                            pow(10, market["supported_price_decimals"]))
-
+                    price_multiplier = pow(10, market["supported_price_decimals"])
+                    return (market["market_id"], 
+                           pow(10, market["supported_size_decimals"]), 
+                           price_multiplier,
+                           Decimal("1") / (Decimal("10") ** market["supported_price_decimals"])
+                           )
             raise Exception(f"Ticker {self.ticker} not found")
 
         except Exception as e:
@@ -994,7 +997,7 @@ class HedgeBot:
 
             # Get contract info
             self.backpack_contract_id, self.backpack_tick_size = await self.get_backpack_contract_info()
-            self.lighter_market_index, self.base_amount_multiplier, self.price_multiplier = self.get_lighter_market_config()
+            self.lighter_market_index, self.base_amount_multiplier, self.price_multiplier, self.tick_size = self.get_lighter_market_config()
 
             self.logger.info(f"Contract info loaded - Backpack: {self.backpack_contract_id}, "
                              f"Lighter: {self.lighter_market_index}")
@@ -1062,7 +1065,7 @@ class HedgeBot:
 
             self.logger.info(f"[STEP 1] Backpack position: {self.backpack_position} | Lighter position: {self.lighter_position}")
 
-            if abs(self.backpack_position + self.lighter_position) > 0.2:
+            if abs(self.backpack_position + self.lighter_position) > self.order_quantity*2:
                 self.logger.error(f"❌ Position diff is too large: {self.backpack_position + self.lighter_position}")
                 break
 
@@ -1096,6 +1099,11 @@ class HedgeBot:
             if self.stop_flag:
                 break
 
+            # Sleep after step 1
+            if self.sleep_time > 0:
+                self.logger.info(f"💤 Sleeping {self.sleep_time} seconds after STEP 1...")
+                await asyncio.sleep(self.sleep_time)
+
             # Close position
             self.logger.info(f"[STEP 2] Backpack position: {self.backpack_position} | Lighter position: {self.lighter_position}")
             self.order_execution_complete = False
@@ -1123,6 +1131,11 @@ class HedgeBot:
                 if time.time() - start_time > 180:
                     self.logger.error("❌ Timeout waiting for trade completion")
                     break
+
+            # Sleep after step 2
+            if self.sleep_time > 0:
+                self.logger.info(f"💤 Sleeping {self.sleep_time} seconds after STEP 2...")
+                await asyncio.sleep(self.sleep_time)
 
             # Close remaining position
             self.logger.info(f"[STEP 3] Backpack position: {self.backpack_position} | Lighter position: {self.lighter_position}")
@@ -1185,5 +1198,7 @@ def parse_arguments():
                         help='Number of iterations to run')
     parser.add_argument('--fill-timeout', type=int, default=5,
                         help='Timeout in seconds for maker order fills (default: 5)')
+    parser.add_argument('--sleep', type=int, default=0,
+                        help='Sleep time in seconds after each step (default: 0)')
 
     return parser.parse_args()
