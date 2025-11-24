@@ -5,6 +5,7 @@ GRVT exchange client implementation.
 import os
 import asyncio
 import time
+import requests
 from decimal import Decimal
 from typing import Dict, Any, List, Optional, Tuple
 from pysdk.grvt_ccxt import GrvtCcxt
@@ -62,6 +63,18 @@ class GrvtClient(BaseExchangeClient):
                 'api_key': self.api_key
             }
 
+            # Add proxy configuration if available
+            socks5_proxy = os.getenv('SOCKS5_PROXY')
+            if socks5_proxy:
+                # GRVT SDK expects proxies as a dict with 'http' and 'https' keys
+                parameters['proxies'] = {
+                    'http': socks5_proxy,
+                    'https': socks5_proxy
+                }
+                print(f"DEBUG: Proxy configuration added to parameters: {parameters['proxies']}")
+            else:
+                print("DEBUG: No SOCKS5_PROXY environment variable found")
+
             # Initialize REST client
             self.rest_client = GrvtCcxt(
                 env=self.env,
@@ -94,6 +107,28 @@ class GrvtClient(BaseExchangeClient):
                 'api_ws_version': 'v1',
                 'private_key': self.private_key
             }
+
+            # Add proxy configuration if available for WebSocket client
+            socks5_proxy = os.getenv('SOCKS5_PROXY')
+            if socks5_proxy:
+                # GRVT SDK expects proxies as a dict with 'http' and 'https' keys
+                parameters['proxies'] = {
+                    'http': socks5_proxy,
+                    'https': socks5_proxy
+                }
+                print(f"DEBUG: WebSocket Proxy configuration added to parameters: {parameters['proxies']}")
+                
+                # Get and log the proxy exit IP
+                try:
+                    proxy_exit_ip = self._get_proxy_exit_ip(socks5_proxy)
+                    if proxy_exit_ip:
+                        print(f"DEBUG: Proxy exit IP: {proxy_exit_ip}")
+                    else:
+                        print("DEBUG: Unable to determine proxy exit IP")
+                except Exception as e:
+                    print(f"DEBUG: Error getting proxy exit IP: {e}")
+            else:
+                print("DEBUG: No SOCKS5_PROXY environment variable found for WebSocket client")
 
             self._ws_client = GrvtCcxtWS(
                 env=self.env,
@@ -509,6 +544,33 @@ class GrvtClient(BaseExchangeClient):
                 return abs(Decimal(position.get('size', 0)))
 
         return Decimal(0)
+
+    def _get_proxy_exit_ip(self, proxy_url: str) -> Optional[str]:
+        """
+        获取代理出口IP地址
+        
+        Args:
+            proxy_url: 代理URL，格式如 socks5://user:pass@host:port
+            
+        Returns:
+            str: 代理出口IP地址，如果获取失败则返回None
+        """
+        try:
+            # 使用代理请求IP查询服务
+            proxies = {
+                'http': proxy_url,
+                'https': proxy_url
+            }
+            
+            # 使用httpbin.org获取出口IP
+            response = requests.get('https://httpbin.org/ip', proxies=proxies, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                return data.get('origin', None)
+            return None
+        except Exception as e:
+            print(f"DEBUG: Error getting proxy exit IP: {e}")
+            return None
 
     async def get_contract_attributes(self) -> Tuple[str, Decimal]:
         """Get contract ID and tick size for a ticker."""
