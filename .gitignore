@@ -154,6 +154,9 @@ celerybeat.pid
 
 # Environments
 .env
+.env.*
+.env.backup
+.env.decrypted
 .venv
 env/
 *_env/
@@ -162,6 +165,15 @@ ENV/
 env.bak/
 venv.bak/
 env_files/
+
+# Security - Encrypted keys and sensitive data
+.keys.enc
+.salt
+*.enc
+*.key
+*_private_key*
+*_secret*
+credentials*.json
 
 # Spyder project settings
 .spyderproject

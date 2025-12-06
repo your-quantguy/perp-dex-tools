@@ -1,0 +1,34 @@
+{
+  "exchanges": ["edgex", "lighter", "backpack"],
+  "symbols": ["BTC-USD", "ETH-USD", "SOL-USD"],
+  "min_profit_bps": 10,
+  "max_position_size_usd": 5000,
+  "check_interval_seconds": 1,
+  "risk": {
+    "max_position_size_usd": 5000,
+    "max_total_exposure_usd": 20000,
+    "max_leverage": 3.0,
+    "max_risk_per_trade_pct": 1.0,
+    "max_daily_loss_pct": 5.0,
+    "max_drawdown_pct": 10.0,
+    "use_kelly_criterion": true,
+    "kelly_fraction": 0.25,
+    "default_stop_loss_pct": 1.0,
+    "default_take_profit_pct": 2.0,
+    "trailing_stop_enabled": true,
+    "trailing_stop_pct": 0.5,
+    "min_profit_bps": 10,
+    "max_execution_time_ms": 5000,
+    "slippage_tolerance_bps": 20
+  },
+  "fees": {
+    "edgex": 0.05,
+    "lighter": 0.02,
+    "backpack": 0.02,
+    "paradex": 0.05,
+    "aster": 0.03,
+    "grvt": 0.02,
+    "extended": 0.05,
+    "apex": 0.05
+  }
+}
