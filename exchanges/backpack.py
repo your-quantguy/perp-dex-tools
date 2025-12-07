@@ -560,7 +560,7 @@ class BackpackClient(BaseExchangeClient):
         position_amt = 0
         for position in positions_data:
             if position.get('symbol', '') == self.config.contract_id:
-                position_amt = abs(Decimal(position.get('netQuantity', 0)))
+                position_amt = Decimal(position.get('netQuantity', 0))
                 break
         return position_amt
 

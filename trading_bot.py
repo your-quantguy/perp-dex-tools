@@ -380,6 +380,7 @@ class TradingBot:
 
                 # Get positions
                 position_amt = await self.exchange_client.get_account_positions()
+                position_amt = abs(position_amt)
 
                 # Calculate active closing amount
                 active_close_amount = sum(

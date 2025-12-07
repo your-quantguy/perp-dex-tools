@@ -17,21 +17,21 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from exchanges.extended import ExtendedClient
+from exchanges.grvt import GrvtClient
 import websockets
 from datetime import datetime
 import pytz
 
 
 class Config:
-    """Simple config class to wrap dictionary for Extended client."""
+    """Simple config class to wrap dictionary for GRVT client."""
     def __init__(self, config_dict):
         for key, value in config_dict.items():
             setattr(self, key, value)
 
 
 class HedgeBot:
-    """Trading bot that places post-only orders on Extended and hedges with market orders on Lighter."""
+    """Trading bot that places post-only orders on GRVT and hedges with market orders on Lighter."""
 
     def __init__(self, ticker: str, order_quantity: Decimal, fill_timeout: int = 5, iterations: int = 20, sleep_time: int = 0):
         self.ticker = ticker
@@ -40,14 +40,14 @@ class HedgeBot:
         self.lighter_order_filled = False
         self.iterations = iterations
         self.sleep_time = sleep_time
-        self.extended_position = Decimal('0')
+        self.grvt_position = Decimal('0')
         self.lighter_position = Decimal('0')
         self.current_order = {}
 
         # Initialize logging to file
         os.makedirs("logs", exist_ok=True)
-        self.log_filename = f"logs/extended_{ticker}_hedge_mode_log.txt"
-        self.csv_filename = f"logs/extended_{ticker}_hedge_mode_trades.csv"
+        self.log_filename = f"logs/grvt_{ticker}_hedge_mode_log.txt"
+        self.csv_filename = f"logs/grvt_{ticker}_hedge_mode_trades.csv"
         self.original_stdout = sys.stdout
 
         # Initialize CSV file with headers if it doesn't exist
@@ -61,9 +61,19 @@ class HedgeBot:
         self.logger.handlers.clear()
 
         # Disable verbose logging from external libraries
-        logging.getLogger('urllib3').setLevel(logging.WARNING)
-        logging.getLogger('requests').setLevel(logging.WARNING)
-        logging.getLogger('websockets').setLevel(logging.WARNING)
+        logging.getLogger('urllib3').setLevel(logging.CRITICAL)
+        logging.getLogger('requests').setLevel(logging.CRITICAL)
+        logging.getLogger('websockets').setLevel(logging.CRITICAL)
+        logging.getLogger('pysdk').setLevel(logging.CRITICAL)
+        logging.getLogger('pysdk.grvt_ccxt').setLevel(logging.CRITICAL)
+        logging.getLogger('pysdk.grvt_ccxt_ws').setLevel(logging.CRITICAL)
+        logging.getLogger('pysdk.grvt_ccxt_logging_selector').setLevel(logging.CRITICAL)
+        logging.getLogger('pysdk.grvt_ccxt_env').setLevel(logging.CRITICAL)
+        logging.getLogger('lighter').setLevel(logging.CRITICAL)
+        logging.getLogger('lighter.signer_client').setLevel(logging.CRITICAL)
+        
+        # Disable root logger propagation to prevent external logs
+        logging.getLogger().setLevel(logging.CRITICAL)
 
         # Create file handler
         file_handler = logging.FileHandler(self.log_filename)
@@ -84,24 +94,24 @@ class HedgeBot:
         self.logger.addHandler(file_handler)
         self.logger.addHandler(console_handler)
 
-        # Prevent propagation to root logger to avoid duplicate messages
+        # Prevent propagation to root logger to avoid duplicate messages and external logs
         self.logger.propagate = False
+        
+        # Ensure our logger only shows our messages
+        self.logger.setLevel(logging.INFO)
 
         # State management
         self.stop_flag = False
         self.order_counter = 0
 
-        # Extended state
-        self.extended_client = None
-        self.extended_contract_id = None
-        self.extended_tick_size = None
-        self.extended_order_status = None
+        # GRVT state
+        self.grvt_client = None
+        self.grvt_contract_id = None
+        self.grvt_tick_size = None
+        self.grvt_order_status = None
 
-        # Extended order book state for websocket-based BBO
-        self.extended_order_book = {'bids': {}, 'asks': {}}
-        self.extended_best_bid = None
-        self.extended_best_ask = None
-        self.extended_order_book_ready = False
+        # GRVT order book state (not used since we use REST API for BBO)
+        # Keeping variables for potential future use but not initializing them
 
         # Lighter order book state
         self.lighter_client = None
@@ -143,11 +153,11 @@ class HedgeBot:
         self.account_index = int(os.getenv('LIGHTER_ACCOUNT_INDEX'))
         self.api_key_index = int(os.getenv('LIGHTER_API_KEY_INDEX'))
 
-        # Extended configuration
-        self.extended_vault = os.getenv('EXTENDED_VAULT')
-        self.extended_stark_key_private = os.getenv('EXTENDED_STARK_KEY_PRIVATE')
-        self.extended_stark_key_public = os.getenv('EXTENDED_STARK_KEY_PUBLIC')
-        self.extended_api_key = os.getenv('EXTENDED_API_KEY')
+        # GRVT configuration
+        self.grvt_trading_account_id = os.getenv('GRVT_TRADING_ACCOUNT_ID')
+        self.grvt_private_key = os.getenv('GRVT_PRIVATE_KEY')
+        self.grvt_api_key = os.getenv('GRVT_API_KEY')
+        self.grvt_environment = os.getenv('GRVT_ENVIRONMENT', 'prod')
 
     def shutdown(self, signum=None, frame=None):
         """Graceful shutdown handler."""
@@ -155,13 +165,13 @@ class HedgeBot:
         self.logger.info("\n🛑 Stopping...")
 
         # Close WebSocket connections
-        if self.extended_client:
+        if self.grvt_client:
             try:
                 # Note: disconnect() is async, but shutdown() is sync
                 # We'll let the cleanup happen naturally
-                self.logger.info("🔌 Extended WebSocket will be disconnected")
+                self.logger.info("🔌 GRVT WebSocket will be disconnected")
             except Exception as e:
-                self.logger.error(f"Error disconnecting Extended WebSocket: {e}")
+                self.logger.error(f"Error disconnecting GRVT WebSocket: {e}")
 
         # Cancel Lighter WebSocket task
         if self.lighter_ws_task and not self.lighter_ws_task.done():
@@ -209,12 +219,16 @@ class HedgeBot:
                                               Decimal(order_data["filled_base_amount"]))
             if order_data["is_ask"]:
                 order_data["side"] = "SHORT"
+                order_type = "OPEN"
                 self.lighter_position -= Decimal(order_data["filled_base_amount"])
             else:
                 order_data["side"] = "LONG"
+                order_type = "CLOSE"
                 self.lighter_position += Decimal(order_data["filled_base_amount"])
+            
+            client_order_index = order_data["client_order_id"]
 
-            self.logger.info(f"📊 Lighter order filled: {order_data['side']} "
+            self.logger.info(f"[{client_order_index}] [{order_type}] [Lighter] [FILLED]: "
                              f"{order_data['filled_base_amount']} @ {order_data['avg_filled_price']}")
 
             # Log Lighter trade to CSV
@@ -453,9 +467,9 @@ class HedgeBot:
                                 elif data.get("type") == "update/account_orders":
                                     # Handle account orders updates
                                     orders = data.get("orders", {}).get(str(self.lighter_market_index), [])
-                                    for order_data in orders:
-                                        if order_data.get("status") == "filled":
-                                            self.handle_lighter_order_result(order_data)
+                                    for order in orders:
+                                        if order.get("status") == "filled":
+                                            self.handle_lighter_order_result(order)
                                 elif data.get("type") == "update/order_book" and not self.lighter_snapshot_loaded:
                                     # Ignore updates until we have the initial snapshot
                                     continue
@@ -522,12 +536,12 @@ class HedgeBot:
             self.logger.info("✅ Lighter client initialized successfully")
         return self.lighter_client
 
-    def initialize_extended_client(self):
-        """Initialize the Extended client."""
-        if not all([self.extended_vault, self.extended_stark_key_private, self.extended_stark_key_public, self.extended_api_key]):
-            raise ValueError("EXTENDED_VAULT, EXTENDED_STARK_KEY_PRIVATE, EXTENDED_STARK_KEY_PUBLIC, and EXTENDED_API_KEY must be set in environment variables")
+    def initialize_grvt_client(self):
+        """Initialize the GRVT client."""
+        if not all([self.grvt_trading_account_id, self.grvt_private_key, self.grvt_api_key]):
+            raise ValueError("GRVT_TRADING_ACCOUNT_ID, GRVT_PRIVATE_KEY, and GRVT_API_KEY must be set in environment variables")
 
-        # Create config for Extended client
+        # Create config for GRVT client
         config_dict = {
             'ticker': self.ticker,
             'contract_id': '',  # Will be set when we get contract info
@@ -536,14 +550,14 @@ class HedgeBot:
             'close_order_side': 'sell'  # Default, will be updated based on strategy
         }
 
-        # Wrap in Config class for Extended client
+        # Wrap in Config class for GRVT client
         config = Config(config_dict)
 
-        # Initialize Extended client
-        self.extended_client = ExtendedClient(config)
+        # Initialize GRVT client
+        self.grvt_client = GrvtClient(config)
 
-        self.logger.info("✅ Extended client initialized successfully")
-        return self.extended_client
+        self.logger.info("✅ GRVT client initialized successfully")
+        return self.grvt_client
 
     def get_lighter_market_config(self) -> Tuple[int, int, int, Decimal]:
         """Get Lighter market configuration."""
@@ -577,48 +591,38 @@ class HedgeBot:
             self.logger.error(f"⚠️ Error getting market config: {e}")
             raise
 
-    async def get_extended_contract_info(self) -> Tuple[str, Decimal]:
-        """Get Extended contract ID and tick size."""
-        if not self.extended_client:
-            raise Exception("Extended client not initialized")
+    async def get_grvt_contract_info(self) -> Tuple[str, Decimal]:
+        """Get GRVT contract ID and tick size."""
+        if not self.grvt_client:
+            raise Exception("GRVT client not initialized")
 
-        contract_id, tick_size = await self.extended_client.get_contract_attributes()
+        contract_id, tick_size = await self.grvt_client.get_contract_attributes()
 
-        if self.order_quantity < self.extended_client.config.quantity:
+        if self.order_quantity < self.grvt_client.config.quantity:
             raise ValueError(
-                f"Order quantity is less than min quantity: {self.order_quantity} < {self.extended_client.config.quantity}")
+                f"Order quantity is less than min quantity: {self.order_quantity} < {self.grvt_client.config.quantity}")
 
         return contract_id, tick_size
 
-    async def fetch_extended_bbo_prices(self) -> Tuple[Decimal, Decimal]:
-        """Fetch best bid/ask prices from Extended using websocket data."""
-        # Use WebSocket data if available
-        if self.extended_order_book_ready and self.extended_best_bid and self.extended_best_ask:
-            if self.extended_best_bid > 0 and self.extended_best_ask > 0 and self.extended_best_bid < self.extended_best_ask:
-                return self.extended_best_bid, self.extended_best_ask
+    async def fetch_grvt_bbo_prices(self) -> Tuple[Decimal, Decimal]:
+        """Fetch best bid/ask prices from GRVT using REST API."""
+        if not self.grvt_client:
+            raise Exception("GRVT client not initialized")
 
-        # Fallback to REST API if websocket data is not available
-        self.logger.warning("WebSocket BBO data not available, falling back to REST API")
-        if not self.extended_client:
-            raise Exception("Extended client not initialized")
-
-        best_bid, best_ask = await self.extended_client.fetch_bbo_prices(self.extended_contract_id)
+        best_bid, best_ask = await self.grvt_client.fetch_bbo_prices(self.grvt_contract_id)
 
         return best_bid, best_ask
 
     def round_to_tick(self, price: Decimal) -> Decimal:
         """Round price to tick size."""
-        if self.extended_tick_size is None:
+        if self.grvt_tick_size is None:
             return price
-        return (price / self.extended_tick_size).quantize(Decimal('1')) * self.extended_tick_size
+        return (price / self.grvt_tick_size).quantize(Decimal('1')) * self.grvt_tick_size
 
     async def place_bbo_order(self, side: str, quantity: Decimal):
-        # Get best bid/ask prices
-        best_bid, best_ask = await self.fetch_extended_bbo_prices()
-
-        # Place the order using Extended client
-        order_result = await self.extended_client.place_open_order(
-            contract_id=self.extended_contract_id,
+        # Place the order using GRVT client
+        order_result = await self.grvt_client.place_open_order(
+            contract_id=self.grvt_contract_id,
             quantity=quantity,
             direction=side.lower()
         )
@@ -628,146 +632,64 @@ class HedgeBot:
         else:
             raise Exception(f"Failed to place order: {order_result.error_message}")
 
-    async def place_extended_post_only_order(self, side: str, quantity: Decimal):
-        """Place a post-only order on Extended."""
-        if not self.extended_client:
-            raise Exception("Extended client not initialized")
+    async def place_grvt_post_only_order(self, side: str, quantity: Decimal):
+        """Place a post-only order on GRVT."""
+        if not self.grvt_client:
+            raise Exception("GRVT client not initialized")
 
-        self.extended_order_status = None
-        self.logger.info(f"[OPEN] [Extended] [{side}] Placing Extended POST-ONLY order")
+        self.grvt_order_status = None
+        self.logger.info(f"[OPEN] [GRVT] [{side}] Placing GRVT POST-ONLY order")
         order_id, order_price = await self.place_bbo_order(side, quantity)
 
         start_time = time.time()
-        last_cancel_time = 0
-        
         while not self.stop_flag:
-            if self.extended_order_status in ['CANCELED', 'CANCELLED']:
-                self.logger.info(f"Order {order_id} was canceled, placing new order")
-                self.extended_order_status = None  # Reset to None to trigger new order
+            if self.grvt_order_status == 'CANCELED':
+                self.grvt_order_status = 'NEW'
                 order_id, order_price = await self.place_bbo_order(side, quantity)
                 start_time = time.time()
-                last_cancel_time = 0  # Reset cancel timer
                 await asyncio.sleep(0.5)
-            elif self.extended_order_status in ['NEW', 'OPEN', 'PENDING', 'CANCELING', 'PARTIALLY_FILLED']:
+            elif self.grvt_order_status in ['NEW', 'OPEN', 'PENDING', 'CANCELING', 'PARTIALLY_FILLED']:
                 await asyncio.sleep(0.5)
-                
                 # Check if we need to cancel and replace the order
                 should_cancel = False
+                best_bid, best_ask = await self.fetch_grvt_bbo_prices()
                 if side == 'buy':
-                    if order_price < self.extended_best_bid:
+                    if order_price < best_bid:
                         should_cancel = True
                 else:
-                    if order_price > self.extended_best_ask:
+                    if order_price > best_ask:
                         should_cancel = True
-
-                # Cancel order if it's been too long or price is off
-                current_time = time.time()
-                if current_time - start_time > 10:
-                    if should_cancel and current_time - last_cancel_time > 5:  # Prevent rapid cancellations
+                if time.time() - start_time > 10:
+                    if should_cancel:
                         try:
-                            self.logger.info(f"Canceling order {order_id} due to timeout/price mismatch")
-                            cancel_result = await self.extended_client.cancel_order(order_id)
-                            self.logger.info(f"cancel_result: {cancel_result}")
-                            if cancel_result.success:
-                                last_cancel_time = current_time
-                                # Don't reset start_time here, let the cancellation trigger new order
-                            else:
-                                self.logger.error(f"❌ Error canceling Extended order: {cancel_result.error_message}")
+                            # Cancel the order using GRVT client
+                            cancel_result = await self.grvt_client.cancel_order(order_id)
+                            if not cancel_result.success:
+                                self.logger.error(f"❌ Error canceling GRVT order: {cancel_result.error_message}")
                         except Exception as e:
-                            self.logger.error(f"❌ Error canceling Extended order: {e}")
-                    elif not should_cancel:
-                        self.logger.info(f"Waiting for Extended order to be filled (order price is at best bid/ask)")
-            elif self.extended_order_status == 'FILLED':
-                self.logger.info(f"Order {order_id} filled successfully")
+                            self.logger.error(f"❌ Error canceling GRVT order: {e}")
+                    else:
+                        self.logger.info(f"Order {order_id} is at best bid/ask, waiting for fill")
+                        start_time = time.time()
+            elif self.grvt_order_status == 'FILLED':
                 break
             else:
-                if self.extended_order_status is not None:
-                    self.logger.error(f"❌ Unknown Extended order status: {self.extended_order_status}")
+                if self.grvt_order_status is not None:
+                    self.logger.error(f"❌ Unknown GRVT order status: {self.grvt_order_status}")
                     break
                 else:
                     await asyncio.sleep(0.5)
 
-    def handle_extended_order_book_update(self, message):
-        """Handle Extended order book updates from WebSocket."""
-        try:
-            if isinstance(message, str):
-                message = json.loads(message)
 
-            self.logger.debug(f"Received Extended order book message: {message}")
-
-            # Check if this is an order book update message
-            if message.get("type") in ["SNAPSHOT", "DELTA"]:
-                data = message.get("data", {})
-
-                if data:
-                    # Handle SNAPSHOT - replace entire order book
-                    if message.get("type") == "SNAPSHOT":
-                        self.extended_order_book['bids'].clear()
-                        self.extended_order_book['asks'].clear()
-
-                    # Update bids - Extended format is [{"p": "price", "q": "size"}, ...]
-                    bids = data.get('b', [])
-                    for bid in bids:
-                        if isinstance(bid, dict):
-                            price = Decimal(bid.get('p', '0'))
-                            size = Decimal(bid.get('q', '0'))
-                        else:
-                            # Fallback for array format [price, size]
-                            price = Decimal(bid[0])
-                            size = Decimal(bid[1])
-                        
-                        if size > 0:
-                            self.extended_order_book['bids'][price] = size
-                        else:
-                            # Remove zero size orders
-                            self.extended_order_book['bids'].pop(price, None)
-
-                    # Update asks - Extended format is [{"p": "price", "q": "size"}, ...]
-                    asks = data.get('a', [])
-                    for ask in asks:
-                        if isinstance(ask, dict):
-                            price = Decimal(ask.get('p', '0'))
-                            size = Decimal(ask.get('q', '0'))
-                        else:
-                            # Fallback for array format [price, size]
-                            price = Decimal(ask[0])
-                            size = Decimal(ask[1])
-                        
-                        if size > 0:
-                            self.extended_order_book['asks'][price] = size
-                        else:
-                            # Remove zero size orders
-                            self.extended_order_book['asks'].pop(price, None)
-
-                    # Update best bid and ask
-                    if self.extended_order_book['bids']:
-                        self.extended_best_bid = max(self.extended_order_book['bids'].keys())
-                    if self.extended_order_book['asks']:
-                        self.extended_best_ask = min(self.extended_order_book['asks'].keys())
-
-                    if not self.extended_order_book_ready:
-                        self.extended_order_book_ready = True
-                        self.logger.info(f"📊 Extended order book ready - Best bid: {self.extended_best_bid}, "
-                                         f"Best ask: {self.extended_best_ask}")
-                    else:
-                        self.logger.debug(f"📊 Order book updated - Best bid: {self.extended_best_bid}, "
-                                          f"Best ask: {self.extended_best_ask}")
-
-        except Exception as e:
-            self.logger.error(f"Error handling Extended order book update: {e}")
-            self.logger.error(f"Message content: {message}")
-
-    def handle_extended_order_update(self, order_data):
-        """Handle Extended order updates from WebSocket."""
+    def handle_grvt_order_update(self, order_data):
+        """Handle GRVT order updates from WebSocket."""
         side = order_data.get('side', '').lower()
         filled_size = Decimal(order_data.get('filled_size', '0'))
         price = Decimal(order_data.get('price', '0'))
 
         if side == 'buy':
-            self.extended_position += filled_size
             lighter_side = 'sell'
         else:
-            self.extended_position -= filled_size
             lighter_side = 'buy'
 
         # Store order details for immediate execution
@@ -783,7 +705,6 @@ class HedgeBot:
 
         self.waiting_for_lighter_fill = True
 
-        self.logger.info(f"📋 Ready to place Lighter order: {lighter_side} {filled_size} @ {price}")
 
     async def place_lighter_market_order(self, lighter_side: str, quantity: Decimal, price: Decimal):
         if not self.lighter_client:
@@ -793,13 +714,14 @@ class HedgeBot:
 
         # Determine order parameters
         if lighter_side.lower() == 'buy':
+            order_type = "CLOSE"
             is_ask = False
             price = best_ask[0] * Decimal('1.002')
         else:
+            order_type = "OPEN"
             is_ask = True
             price = best_bid[0] * Decimal('0.998')
 
-        self.logger.info(f"Placing Lighter market order: {lighter_side} {quantity} | is_ask: {is_ask}")
 
         # Reset order state
         self.lighter_order_filled = False
@@ -829,7 +751,9 @@ class HedgeBot:
                 tx_type=self.lighter_client.TX_TYPE_CREATE_ORDER,
                 tx_info=tx_info
             )
-            self.logger.info(f"🚀 Lighter limit order sent: {lighter_side} {quantity}")
+
+            self.logger.info(f"[{client_order_index}] [{order_type}] [Lighter] [OPEN]: {quantity}")
+
             await self.monitor_lighter_order(client_order_index)
 
             return tx_hash
@@ -839,7 +763,6 @@ class HedgeBot:
 
     async def monitor_lighter_order(self, client_order_index: int):
         """Monitor Lighter order and adjust price if needed."""
-        self.logger.info(f"🔍 Starting to monitor Lighter order - Order ID: {client_order_index}")
 
         start_time = time.time()
         while not self.lighter_order_filled and not self.stop_flag:
@@ -892,17 +815,15 @@ class HedgeBot:
             import traceback
             self.logger.error(f"❌ Full traceback: {traceback.format_exc()}")
 
-    async def setup_extended_websocket(self):
-        """Setup Extended websocket for order updates and order book data."""
-        if not self.extended_client:
-            raise Exception("Extended client not initialized")
+    async def setup_grvt_websocket(self):
+        """Setup GRVT websocket for order updates and order book data."""
+        if not self.grvt_client:
+            raise Exception("GRVT client not initialized")
 
         def order_update_handler(order_data):
-            """Handle order updates from Extended WebSocket."""
-            if order_data.get('contract_id') != self.extended_contract_id:
-                self.logger.info(f"Ignoring order update from {order_data.get('contract_id')}")
+            """Handle order updates from GRVT WebSocket."""
+            if order_data.get('contract_id') != self.grvt_contract_id:
                 return
-
             try:
                 order_id = order_data.get('order_id')
                 status = order_data.get('status')
@@ -915,121 +836,59 @@ class HedgeBot:
                     order_type = "OPEN"
                 else:
                     order_type = "CLOSE"
+                
+                if status == 'CANCELED' and filled_size > 0:
+                    status = 'FILLED'
 
                 # Handle the order update
-                if status == 'FILLED':
+                if status == 'FILLED' and self.grvt_order_status != 'FILLED':
                     if side == 'buy':
-                        self.extended_position += filled_size
+                        self.grvt_position += filled_size
                     else:
-                        self.extended_position -= filled_size
-                    self.logger.info(f"[{order_id}] [{order_type}] [Extended] [{status}]: {filled_size} @ {price}")
-                    self.extended_order_status = status
+                        self.grvt_position -= filled_size
+                    self.logger.info(f"[{order_id}] [{order_type}] [GRVT] [{status}]: {filled_size} @ {price}")
+                    self.grvt_order_status = status
 
-                    # Log Extended trade to CSV
+                    # Log GRVT trade to CSV
                     self.log_trade_to_csv(
-                        exchange='Extended',
+                        exchange='GRVT',
                         side=side,
                         price=str(price),
                         quantity=str(filled_size)
                     )
 
-                    self.handle_extended_order_update({
+                    self.handle_grvt_order_update({
                         'order_id': order_id,
                         'side': side,
                         'status': status,
                         'size': size,
                         'price': price,
-                        'contract_id': self.extended_contract_id,
+                        'contract_id': self.grvt_contract_id,
                         'filled_size': filled_size
                     })
-                else:
+                elif self.grvt_order_status != 'FILLED':
                     if status == 'OPEN':
-                        self.logger.info(f"[{order_id}] [{order_type}] [Extended] [{status}]: {size} @ {price}")
+                        self.logger.info(f"[{order_id}] [{order_type}] [GRVT] [{status}]: {size} @ {price}")
                     else:
-                        self.logger.info(f"[{order_id}] [{order_type}] [Extended] [{status}]: {filled_size} @ {price}")
-                    # Update order status for all non-filled statuses
-                    if status == 'PARTIALLY_FILLED':
-                        self.extended_order_status = "OPEN"
-                    elif status in ['CANCELED', 'CANCELLED']:
-                        self.extended_order_status = status
-                    elif status in ['NEW', 'OPEN', 'PENDING', 'CANCELING']:
-                        self.extended_order_status = status
-                    else:
-                        self.logger.warning(f"Unknown order status: {status}")
-                        self.extended_order_status = status
+                        self.logger.info(f"[{order_id}] [{order_type}] [GRVT] [{status}]: {filled_size} @ {price}")
+                    self.grvt_order_status = status
 
             except Exception as e:
-                self.logger.error(f"Error handling Extended order update: {e}")
+                self.logger.error(f"Error handling GRVT order update: {e}")
 
         try:
             # Setup order update handler
-            self.extended_client.setup_order_update_handler(order_update_handler)
-            self.logger.info("✅ Extended WebSocket order update handler set up")
+            self.grvt_client.setup_order_update_handler(order_update_handler)
+            self.logger.info("✅ GRVT WebSocket order update handler set up")
 
-            # Connect to Extended WebSocket
-            await self.extended_client.connect()
-            self.logger.info("✅ Extended WebSocket connection established")
+            # Connect to GRVT WebSocket
+            await self.grvt_client.connect()
+            self.logger.info("✅ GRVT WebSocket connection established")
 
-            # Setup separate WebSocket connection for depth updates
-            await self.setup_extended_depth_websocket()
 
         except Exception as e:
-            self.logger.error(f"Could not setup Extended WebSocket handlers: {e}")
+            self.logger.error(f"Could not setup GRVT WebSocket handlers: {e}")
 
-    async def setup_extended_depth_websocket(self):
-        """Setup separate WebSocket connection for Extended depth updates."""
-        try:
-            import websockets
-
-            async def handle_depth_websocket():
-                """Handle depth WebSocket connection."""
-                # Use the correct Extended WebSocket URL for order book stream
-                market_name = f"{self.ticker}-USD"  # Extended uses format like BTC-USD
-                url = f"wss://api.starknet.extended.exchange/stream.extended.exchange/v1/orderbooks/{market_name}?depth=1"
-
-                while not self.stop_flag:
-                    try:
-                        async with websockets.connect(url) as ws:
-                            self.logger.info(f"✅ Connected to Extended order book stream for {market_name}")
-
-                            # Listen for messages
-                            async for message in ws:
-                                if self.stop_flag:
-                                    break
-
-                                try:
-                                    # Handle ping frames
-                                    if isinstance(message, bytes) and message == b'\x09':
-                                        await ws.pong()
-                                        continue
-
-                                    data = json.loads(message)
-                                    self.logger.debug(f"Received Extended order book message: {data}")
-
-                                    # Handle order book updates
-                                    if data.get("type") in ["SNAPSHOT", "DELTA"]:
-                                        self.handle_extended_order_book_update(data)
-
-                                except json.JSONDecodeError as e:
-                                    self.logger.warning(f"Failed to parse Extended order book message: {e}")
-                                except Exception as e:
-                                    self.logger.error(f"Error handling Extended order book message: {e}")
-
-                    except websockets.exceptions.ConnectionClosed:
-                        self.logger.warning("Extended order book WebSocket connection closed, reconnecting...")
-                    except Exception as e:
-                        self.logger.error(f"Extended order book WebSocket error: {e}")
-
-                    # Wait before reconnecting
-                    if not self.stop_flag:
-                        await asyncio.sleep(2)
-
-            # Start depth WebSocket in background
-            asyncio.create_task(handle_depth_websocket())
-            self.logger.info("✅ Extended order book WebSocket task started")
-
-        except Exception as e:
-            self.logger.error(f"Could not setup Extended order book WebSocket: {e}")
 
     async def trading_loop(self):
         """Main trading loop implementing the new strategy."""
@@ -1038,41 +897,26 @@ class HedgeBot:
         # Initialize clients
         try:
             self.initialize_lighter_client()
-            self.initialize_extended_client()
+            self.initialize_grvt_client()
 
             # Get contract info
-            self.extended_contract_id, self.extended_tick_size = await self.get_extended_contract_info()
+            self.grvt_contract_id, self.grvt_tick_size = await self.get_grvt_contract_info()
             self.lighter_market_index, self.base_amount_multiplier, self.price_multiplier, self.tick_size = self.get_lighter_market_config()
 
-            self.logger.info(f"Contract info loaded - Extended: {self.extended_contract_id}, "
+            self.logger.info(f"Contract info loaded - GRVT: {self.grvt_contract_id}, "
                              f"Lighter: {self.lighter_market_index}")
 
         except Exception as e:
             self.logger.error(f"❌ Failed to initialize: {e}")
             return
 
-        # Setup Extended websocket
+        # Setup GRVT websocket
         try:
-            await self.setup_extended_websocket()
-            self.logger.info("✅ Extended WebSocket connection established")
-
-            # Wait for initial order book data with timeout
-            self.logger.info("⏳ Waiting for initial order book data...")
-            timeout = 10  # seconds
-            start_time = time.time()
-            while not self.extended_order_book_ready and not self.stop_flag:
-                if time.time() - start_time > timeout:
-                    self.logger.warning(f"⚠️ Timeout waiting for WebSocket order book data after {timeout}s")
-                    break
-                await asyncio.sleep(0.5)
-
-            if self.extended_order_book_ready:
-                self.logger.info("✅ WebSocket order book data received")
-            else:
-                self.logger.warning("⚠️ WebSocket order book not ready, will use REST API fallback")
+            await self.setup_grvt_websocket()
+            self.logger.info("✅ GRVT WebSocket connection established")
 
         except Exception as e:
-            self.logger.error(f"❌ Failed to setup Extended websocket: {e}")
+            self.logger.error(f"❌ Failed to setup GRVT websocket: {e}")
             return
 
         # Setup Lighter websocket
@@ -1108,10 +952,10 @@ class HedgeBot:
             self.logger.info(f"🔄 Trading loop iteration {iterations}")
             self.logger.info("-----------------------------------------------")
 
-            self.logger.info(f"[STEP 1] Extended position: {self.extended_position} | Lighter position: {self.lighter_position}")
+            self.logger.info(f"[STEP 1] GRVT position: {self.grvt_position} | Lighter position: {self.lighter_position}")
 
-            if abs(self.extended_position + self.lighter_position) > self.order_quantity*2:
-                self.logger.error(f"❌ Position diff is too large: {self.extended_position + self.lighter_position}")
+            if abs(self.grvt_position + self.lighter_position) > self.order_quantity*2:
+                self.logger.error(f"❌ Position diff is too large: {self.grvt_position + self.lighter_position}")
                 break
 
             self.order_execution_complete = False
@@ -1119,7 +963,7 @@ class HedgeBot:
             try:
                 # Determine side based on some logic (for now, alternate)
                 side = 'buy'
-                await self.place_extended_post_only_order(side, self.order_quantity)
+                await self.place_grvt_post_only_order(side, self.order_quantity)
             except Exception as e:
                 self.logger.error(f"⚠️ Error in trading loop: {e}")
                 self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
@@ -1127,7 +971,7 @@ class HedgeBot:
 
             start_time = time.time()
             while not self.order_execution_complete and not self.stop_flag:
-                # Check if Extended order filled and we need to place Lighter order
+                # Check if GRVT order filled and we need to place Lighter order
                 if self.waiting_for_lighter_fill:
                     await self.place_lighter_market_order(
                         self.current_lighter_side,
@@ -1150,20 +994,20 @@ class HedgeBot:
                 await asyncio.sleep(self.sleep_time)
 
             # Close position
-            self.logger.info(f"[STEP 2] Extended position: {self.extended_position} | Lighter position: {self.lighter_position}")
+            self.logger.info(f"[STEP 2] GRVT position: {self.grvt_position} | Lighter position: {self.lighter_position}")
             self.order_execution_complete = False
             self.waiting_for_lighter_fill = False
             try:
                 # Determine side based on some logic (for now, alternate)
                 side = 'sell'
-                await self.place_extended_post_only_order(side, self.order_quantity)
+                await self.place_grvt_post_only_order(side, self.order_quantity)
             except Exception as e:
                 self.logger.error(f"⚠️ Error in trading loop: {e}")
                 self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
                 break
 
             while not self.order_execution_complete and not self.stop_flag:
-                # Check if Extended order filled and we need to place Lighter order
+                # Check if GRVT order filled and we need to place Lighter order
                 if self.waiting_for_lighter_fill:
                     await self.place_lighter_market_order(
                         self.current_lighter_side,
@@ -1178,19 +1022,19 @@ class HedgeBot:
                     break
 
             # Close remaining position
-            self.logger.info(f"[STEP 3] Extended position: {self.extended_position} | Lighter position: {self.lighter_position}")
+            self.logger.info(f"[STEP 3] GRVT position: {self.grvt_position} | Lighter position: {self.lighter_position}")
             self.order_execution_complete = False
             self.waiting_for_lighter_fill = False
-            if self.extended_position == 0:
+            if self.grvt_position == 0:
                 continue
-            elif self.extended_position > 0:
+            elif self.grvt_position > 0:
                 side = 'sell'
             else:
                 side = 'buy'
 
             try:
                 # Determine side based on some logic (for now, alternate)
-                await self.place_extended_post_only_order(side, abs(self.extended_position))
+                await self.place_grvt_post_only_order(side, abs(self.grvt_position))
             except Exception as e:
                 self.logger.error(f"⚠️ Error in trading loop: {e}")
                 self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
@@ -1198,7 +1042,7 @@ class HedgeBot:
 
             # Wait for order to be filled via WebSocket
             while not self.order_execution_complete and not self.stop_flag:
-                # Check if Extended order filled and we need to place Lighter order
+                # Check if GRVT order filled and we need to place Lighter order
                 if self.waiting_for_lighter_fill:
                     await self.place_lighter_market_order(
                         self.current_lighter_side,
@@ -1227,7 +1071,7 @@ class HedgeBot:
 
 def parse_arguments():
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description='Trading bot for Extended and Lighter')
+    parser = argparse.ArgumentParser(description='Trading bot for GRVT and Lighter')
     parser.add_argument('--exchange', type=str,
                         help='Exchange')
     parser.add_argument('--ticker', type=str, default='BTC',

@@ -32,15 +32,18 @@ class Config:
 class HedgeBot:
     """Trading bot that places post-only orders on Backpack and hedges with market orders on Lighter."""
 
-    def __init__(self, ticker: str, order_quantity: Decimal, fill_timeout: int = 5, iterations: int = 20):
+    def __init__(self, ticker: str, order_quantity: Decimal, fill_timeout: int = 5, iterations: int = 20, sleep_time: int = 0, max_position: Decimal = Decimal('0')):
         self.ticker = ticker
         self.order_quantity = order_quantity
         self.fill_timeout = fill_timeout
         self.lighter_order_filled = False
         self.iterations = iterations
-        self.backpack_position = Decimal('0')
-        self.lighter_position = Decimal('0')
+        self.sleep_time = sleep_time
         self.current_order = {}
+        if max_position == Decimal('0'):
+            self.max_position = order_quantity
+        else:
+            self.max_position = max_position        
 
         # Initialize logging to file
         os.makedirs("logs", exist_ok=True)
@@ -316,9 +319,9 @@ class HedgeBot:
             raise Exception("Cannot calculate order price - missing order book data")
 
         if is_ask:
-            order_price = best_bid[0] + Decimal('0.1')
+            order_price = best_bid[0] + self.tick_size
         else:
-            order_price = best_ask[0] - Decimal('0.1')
+            order_price = best_ask[0] - self.tick_size
 
         return order_price
 
@@ -545,7 +548,7 @@ class HedgeBot:
         self.logger.info("✅ Backpack client initialized successfully")
         return self.backpack_client
 
-    def get_lighter_market_config(self) -> Tuple[int, int, int]:
+    def get_lighter_market_config(self) -> Tuple[int, int, int, Decimal]:
         """Get Lighter market configuration."""
         url = f"{self.lighter_base_url}/api/v1/orderBooks"
         headers = {"accept": "application/json"}
@@ -564,10 +567,12 @@ class HedgeBot:
 
             for market in data["order_books"]:
                 if market["symbol"] == self.ticker:
-                    return (market["market_id"],
-                            pow(10, market["supported_size_decimals"]),
-                            pow(10, market["supported_price_decimals"]))
-
+                    price_multiplier = pow(10, market["supported_price_decimals"])
+                    return (market["market_id"], 
+                           pow(10, market["supported_size_decimals"]), 
+                           price_multiplier,
+                           Decimal("1") / (Decimal("10") ** market["supported_price_decimals"])
+                           )
             raise Exception(f"Ticker {self.ticker} not found")
 
         except Exception as e:
@@ -586,6 +591,13 @@ class HedgeBot:
                 f"Order quantity is less than min quantity: {self.order_quantity} < {self.backpack_client.config.quantity}")
 
         return contract_id, tick_size
+
+    async def get_backpack_position(self) -> Decimal:
+        """Get Backpack position."""
+        if not self.backpack_client:
+            raise Exception("Backpack client not initialized")
+
+        return await self.backpack_client.get_account_positions()
 
     async def fetch_backpack_bbo_prices(self) -> Tuple[Decimal, Decimal]:
         """Fetch best bid/ask prices from Backpack using websocket data."""
@@ -983,6 +995,45 @@ class HedgeBot:
         except Exception as e:
             self.logger.error(f"Could not setup Backpack depth WebSocket: {e}")
 
+    def get_lighter_position(self):
+        url = "https://mainnet.zklighter.elliot.ai/api/v1/account"
+        headers = {"accept": "application/json"}
+
+        current_position = None
+        parameters = {"by": "index", "value": self.account_index}
+        try:
+            response = requests.get(url, headers=headers, params=parameters, timeout=10)
+            response.raise_for_status()  # Raise an exception for bad status codes
+
+            # Check if response has content
+            if not response.text.strip():
+                print("⚠️ Empty response from Lighter API for position check")
+                return self.lighter_position
+
+            data = response.json()
+
+            if 'accounts' not in data or not data['accounts']:
+                print(f"⚠️ Unexpected response format from Lighter API: {data}")
+                return self.lighter_position
+
+            positions = data['accounts'][0].get('positions', [])
+            for position in positions:
+                if position.get('symbol') == self.ticker:
+                    current_position = Decimal(position['position']) * position['sign']
+                    break
+            if current_position is None:
+                current_position = 0
+
+        except requests.exceptions.RequestException as e:
+            print(f"⚠️ Network error getting position: {e}")
+        except json.JSONDecodeError as e:
+            print(f"⚠️ JSON parsing error in position response: {e}")
+            print(f"Response text: {response.text[:200]}...")  # Show first 200 chars
+        except Exception as e:
+            print(f"⚠️ Unexpected error getting position: {e}")
+
+        return current_position
+
     async def trading_loop(self):
         """Main trading loop implementing the new strategy."""
         self.logger.info(f"🚀 Starting hedge bot for {self.ticker}")
@@ -994,7 +1045,7 @@ class HedgeBot:
 
             # Get contract info
             self.backpack_contract_id, self.backpack_tick_size = await self.get_backpack_contract_info()
-            self.lighter_market_index, self.base_amount_multiplier, self.price_multiplier = self.get_lighter_market_config()
+            self.lighter_market_index, self.base_amount_multiplier, self.price_multiplier, self.tick_size = self.get_lighter_market_config()
 
             self.logger.info(f"Contract info loaded - Backpack: {self.backpack_contract_id}, "
                              f"Lighter: {self.lighter_market_index}")
@@ -1054,109 +1105,100 @@ class HedgeBot:
         await asyncio.sleep(5)
 
         iterations = 0
+        self.lighter_position = self.get_lighter_position()
+        self.backpack_position = await self.get_backpack_position()
         while iterations < self.iterations and not self.stop_flag:
             iterations += 1
             self.logger.info("-----------------------------------------------")
             self.logger.info(f"🔄 Trading loop iteration {iterations}")
             self.logger.info("-----------------------------------------------")
 
-            self.logger.info(f"[STEP 1] Backpack position: {self.backpack_position} | Lighter position: {self.lighter_position}")
+            while self.backpack_position < self.max_position and not self.stop_flag:
+                self.lighter_position = self.get_lighter_position()
+                self.backpack_position = await self.get_backpack_position()
+                self.logger.info(f"Buying up to {self.max_position} | Backpack position: {self.backpack_position} | Lighter position: {self.lighter_position}")
+                if abs(self.backpack_position + self.lighter_position) > self.order_quantity*2:
+                    self.logger.error(f"❌ Position diff is too large: {self.backpack_position + self.lighter_position}")
+                    sys.exit(1)
 
-            if abs(self.backpack_position + self.lighter_position) > 0.2:
-                self.logger.error(f"❌ Position diff is too large: {self.backpack_position + self.lighter_position}")
-                break
+                self.order_execution_complete = False
+                self.waiting_for_lighter_fill = False
+                try:
+                    # Determine side based on some logic (for now, alternate)
+                    side = 'buy'
+                    await self.place_backpack_post_only_order(side, self.order_quantity)
+                except Exception as e:
+                    self.logger.error(f"⚠️ Error in trading loop: {e}")
+                    self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
+                    sys.exit(1)
 
-            self.order_execution_complete = False
-            self.waiting_for_lighter_fill = False
-            try:
-                # Determine side based on some logic (for now, alternate)
-                side = 'buy'
-                await self.place_backpack_post_only_order(side, self.order_quantity)
-            except Exception as e:
-                self.logger.error(f"⚠️ Error in trading loop: {e}")
-                self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
-                break
+                start_time = time.time()
+                while not self.order_execution_complete and not self.stop_flag:
+                    # Check if Backpack order filled and we need to place Lighter order
+                    if self.waiting_for_lighter_fill:
+                        await self.place_lighter_market_order(
+                            self.current_lighter_side,
+                            self.current_lighter_quantity,
+                            self.current_lighter_price
+                        )
+                        break
 
-            start_time = time.time()
-            while not self.order_execution_complete and not self.stop_flag:
-                # Check if Backpack order filled and we need to place Lighter order
-                if self.waiting_for_lighter_fill:
-                    await self.place_lighter_market_order(
-                        self.current_lighter_side,
-                        self.current_lighter_quantity,
-                        self.current_lighter_price
-                    )
+                    await asyncio.sleep(0.01)
+                    if time.time() - start_time > 180:
+                        self.logger.error("❌ Timeout waiting for trade completion")
+                        break
+
+                if self.stop_flag:
                     break
 
-                await asyncio.sleep(0.01)
-                if time.time() - start_time > 180:
-                    self.logger.error("❌ Timeout waiting for trade completion")
+            if self.sleep_time > 0:
+                self.logger.info(f"💤 Sleeping {self.sleep_time} seconds ...")
+                await asyncio.sleep(self.sleep_time)
+
+            exit_after_next_trade = False
+            while self.backpack_position > -1*self.max_position and not self.stop_flag:
+                self.lighter_position = self.get_lighter_position()
+                self.backpack_position = await self.get_backpack_position()
+                self.logger.info(f"Selling up to -{self.max_position} | Backpack position: {self.backpack_position} | Lighter position: {self.lighter_position}")
+                if abs(self.backpack_position + self.lighter_position) > self.order_quantity*2:
+                    self.logger.error(f"❌ Position diff is too large: {self.backpack_position + self.lighter_position}")
+                    sys.exit(1)
+
+                if iterations == self.iterations:
+                    if self.backpack_position>0 and self.backpack_position <= self.order_quantity:
+                        exit_after_next_trade = True
+
+                self.order_execution_complete = False
+                self.waiting_for_lighter_fill = False
+                try:
+                    # Determine side based on some logic (for now, alternate)
+                    side = 'sell'
+                    if exit_after_next_trade:
+                        await self.place_backpack_post_only_order(side, abs(self.backpack_position))
+                    else:
+                        await self.place_backpack_post_only_order(side, self.order_quantity)
+                except Exception as e:
+                    self.logger.error(f"⚠️ Error in trading loop: {e}")
+                    self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
                     break
 
-            if self.stop_flag:
-                break
+                while not self.order_execution_complete and not self.stop_flag:
+                    # Check if Backpack order filled and we need to place Lighter order
+                    if self.waiting_for_lighter_fill:
+                        await self.place_lighter_market_order(
+                            self.current_lighter_side,
+                            self.current_lighter_quantity,
+                            self.current_lighter_price
+                        )
+                        break
 
-            # Close position
-            self.logger.info(f"[STEP 2] Backpack position: {self.backpack_position} | Lighter position: {self.lighter_position}")
-            self.order_execution_complete = False
-            self.waiting_for_lighter_fill = False
-            try:
-                # Determine side based on some logic (for now, alternate)
-                side = 'sell'
-                await self.place_backpack_post_only_order(side, self.order_quantity)
-            except Exception as e:
-                self.logger.error(f"⚠️ Error in trading loop: {e}")
-                self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
-                break
-
-            while not self.order_execution_complete and not self.stop_flag:
-                # Check if Backpack order filled and we need to place Lighter order
-                if self.waiting_for_lighter_fill:
-                    await self.place_lighter_market_order(
-                        self.current_lighter_side,
-                        self.current_lighter_quantity,
-                        self.current_lighter_price
-                    )
-                    break
-
-                await asyncio.sleep(0.01)
-                if time.time() - start_time > 180:
-                    self.logger.error("❌ Timeout waiting for trade completion")
-                    break
-
-            # Close remaining position
-            self.logger.info(f"[STEP 3] Backpack position: {self.backpack_position} | Lighter position: {self.lighter_position}")
-            self.order_execution_complete = False
-            self.waiting_for_lighter_fill = False
-            if self.backpack_position == 0:
-                continue
-            elif self.backpack_position > 0:
-                side = 'sell'
-            else:
-                side = 'buy'
-
-            try:
-                # Determine side based on some logic (for now, alternate)
-                await self.place_backpack_post_only_order(side, abs(self.backpack_position))
-            except Exception as e:
-                self.logger.error(f"⚠️ Error in trading loop: {e}")
-                self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
-                break
-
-            # Wait for order to be filled via WebSocket
-            while not self.order_execution_complete and not self.stop_flag:
-                # Check if Backpack order filled and we need to place Lighter order
-                if self.waiting_for_lighter_fill:
-                    await self.place_lighter_market_order(
-                        self.current_lighter_side,
-                        self.current_lighter_quantity,
-                        self.current_lighter_price
-                    )
-                    break
-
-                await asyncio.sleep(0.01)
-                if time.time() - start_time > 180:
-                    self.logger.error("❌ Timeout waiting for trade completion")
+                    await asyncio.sleep(0.01)
+                    if time.time() - start_time > 180:
+                        self.logger.error("❌ Timeout waiting for trade completion")
+                        break
+                
+                if exit_after_next_trade:
+                    self.logger.info("Position back to zero. Done! Exiting...")
                     break
 
     async def run(self):
@@ -1170,20 +1212,3 @@ class HedgeBot:
         finally:
             self.logger.info("🔄 Cleaning up...")
             self.shutdown()
-
-
-def parse_arguments():
-    """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description='Trading bot for Backpack and Lighter')
-    parser.add_argument('--exchange', type=str,
-                        help='Exchange')
-    parser.add_argument('--ticker', type=str, default='BTC',
-                        help='Ticker symbol (default: BTC)')
-    parser.add_argument('--size', type=str,
-                        help='Number of tokens to buy/sell per order')
-    parser.add_argument('--iter', type=int,
-                        help='Number of iterations to run')
-    parser.add_argument('--fill-timeout', type=int, default=5,
-                        help='Timeout in seconds for maker order fills (default: 5)')
-
-    return parser.parse_args()

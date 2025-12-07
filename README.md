@@ -37,7 +37,10 @@
 获得 1.3x 全网最高的积分加成，未来的手续费返佣（官方预计 10 月中上线），以及即将开始的专属交易竞赛
 
 #### Extended: [https://app.extended.exchange/join/QUANT](https://app.extended.exchange/join/QUANT)
-10%的即时手续费减免；积分加成（官方未公布具体加成公式，但文档里有明确说明，通过官方大使邀请能拿到比自己小号邀请自己更多的分数）；参与社群的专属交易量大赛，奖池高达$70000，10月15日结束
+10%的即时手续费减免；积分加成（官方未公布具体加成公式，但文档里有明确说明，通过官方大使邀请能拿到比自己小号邀请自己更多的分数）
+
+#### ApeX: [https://join.omni.apex.exchange/quant]( https://join.omni.apex.exchange/quant)
+30%返佣; 5%手续费减免; 积分加成; 有资格参与10月20日至11月2日的社区专属交易竞赛，总奖金高达$5500
 
 ## 安装
 
@@ -126,6 +129,17 @@ Python 版本要求（最佳选项是 Python 3.10 - 3.12）：
 
    ```bash
    pip install -r para_requirements.txt
+   ```
+
+   **apex 用户**：如果您想使用 apex 交易所，需要额外安装 apex 专用依赖：
+   激活虚拟环境（每次使用脚本时，都需要激活虚拟环境）：
+
+   ```bash
+   source env/bin/activate  # Windows: env\Scripts\activate
+   ```
+
+   ```bash
+   pip install -r apex_requirements.txt
    ```
 
 4. **设置环境变量**：
@@ -291,20 +305,31 @@ python runbot.py --exchange extended --ticker ETH --quantity 0.1 --take-profit 0
 ### 对冲模式使用示例
 
 ```bash
-# 运行 BTC 对冲模式
-python hedge_mode.py --exchange backpack --ticker BTC --size 0.05 --iter 20
+# 运行 BTC 对冲模式（Backpack）
+python hedge_mode.py --exchange backpack --ticker BTC --size 0.05 --iter 20 --max-position 1
 
-# 运行 ETH 对冲模式
-python hedge_mode.py --exchange backpack --ticker ETH --size 0.1 --iter 20
+# 运行 ETH 对冲模式（Extended）
+python hedge_mode.py --exchange extended --ticker ETH --size 0.1 --iter 20
+
+# 运行 BTC 对冲模式（Apex）
+python hedge_mode.py --exchange apex --ticker BTC --size 0.05 --iter 20
+
+# 运行 BTC 对冲模式（GRVT）
+python hedge_mode.py --exchange grvt --ticker BTC --size 0.05 --iter 20
+
+# 运行 BTC 对冲模式（edgeX）
+python hedge_mode.py --exchange edgex --ticker BTC --size 0.001 --iter 20
 ```
 
 ### 对冲模式参数
 
-- `--exchange`: 主要交易所（目前支持 'backpack'）
+- `--exchange`: 主要交易所（支持 'backpack', 'extended', 'apex', 'grvt', 'edgex'）
 - `--ticker`: 交易对符号（如 BTC, ETH）
 - `--size`: 每笔订单数量
 - `--iter`: 交易循环次数
 - `--fill-timeout`: maker 订单填充超时时间（秒，默认 5）
+- `--sleep`: 每一笔交易之后的暂停时间，增加持仓时间（秒，默认 0）
+- `--max-position`: 当设置了这个参数后，对冲模式会在对冲的同时逐渐建仓到设置的最大仓位，单位是币本位，比如在跑btc时设置0.1，就是指逐渐建仓到0.1btc，并逐渐建仓。达到这个最大仓位后，会逐渐建仓，以此循环。
 
 ## 配置
 
@@ -359,6 +384,13 @@ python hedge_mode.py --exchange backpack --ticker ETH --size 0.1 --iter 20
 - `EXTENDED_STARK_KEY_PUBLIC`: 创建API后显示的 Stark 公钥
 - `EXTENDED_STARK_KEY_PRIVATE`: 创建API后显示的 Stark 私钥
 - `EXTENDED_VAULT`: 创建API后显示的 Extended Vault ID
+
+#### Apex 配置
+
+- `APEX_API_KEY`: 您的 Apex API 密钥
+- `APEX_API_KEY_PASSPHRASE`: 您的 Apex API 密钥密码
+- `APEX_API_KEY_SECRET`: 您的 Apex API 密钥私钥
+- `APEX_OMNI_KEY_SEED`: 您的 Apex Omni 密钥种子
 
 **获取 LIGHTER_ACCOUNT_INDEX 的方法**：
 
