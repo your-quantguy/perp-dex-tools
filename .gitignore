@@ -197,3 +197,5 @@ cython_debug/
 # pyenv settings
 .python-version
 .github/copilot-instructions.md
+uv.lock
+uv.lock
