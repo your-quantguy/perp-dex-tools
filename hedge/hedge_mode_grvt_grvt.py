@@ -32,14 +32,15 @@ class Config:
 class HedgeBot:
     """Trading bot that places post-only orders on GRVT and hedges with market orders on another GRVT account."""
 
-    def __init__(self, ticker: str, order_quantity: Decimal, fill_timeout: int = 5, iterations: int = 20, sleep_time: int = 0, initial_direction: str = 'buy'):
+    def __init__(self, ticker: str, order_quantity: Decimal, fill_timeout: int = 5, iterations: int = 20, sleep_time: int = 0, initial_direction: str = 'buy', trade_type: str = 'single'):
         self.ticker = ticker
         self.order_quantity = order_quantity
         self.fill_timeout = fill_timeout
         self.grvt2_order_filled = False
         self.iterations = iterations
         self.sleep_time = sleep_time
-        self.initial_direction = initial_direction.lower()
+        self.initial_direction = initial_direction
+        self.trade_type = trade_type
         self.grvt1_position = Decimal('0')
         self.grvt2_position = Decimal('0')
         self.current_order = {}
@@ -703,7 +704,7 @@ class HedgeBot:
             self.order_execution_complete = False
             self.waiting_for_grvt2_fill = False
             try:
-                # Open position - use initial_direction from parameter
+                # Open position
                 side = self.initial_direction
                 await self.place_grvt1_post_only_order(side, self.order_quantity)
             except Exception as e:
@@ -735,13 +736,17 @@ class HedgeBot:
                 self.logger.info(f"💤 Sleeping {self.sleep_time} seconds after STEP 1...")
                 await asyncio.sleep(self.sleep_time)
 
-            # Close position
+            # 如果是 single 模式，跳过 STEP 2 和 STEP 3
+            if self.trade_type == 'single':
+                self.logger.info(f"[SINGLE MODE] Skipping close position steps")
+                continue
+
+            # Close position (仅在 twice 模式执行)
             self.logger.info(f"[STEP 2] GRVT1 position: {self.grvt1_position} | GRVT2 position: {self.grvt2_position}")
             self.order_execution_complete = False
             self.waiting_for_grvt2_fill = False
             try:
-                # Close position - opposite of initial direction
-                side = 'sell' if self.initial_direction == 'buy' else 'buy'
+                side = 'buy' if self.initial_direction == 'sell' else 'sell'
                 await self.place_grvt1_post_only_order(side, self.order_quantity)
             except Exception as e:
                 self.logger.error(f"⚠️ Error in trading loop: {e}")
@@ -798,10 +803,6 @@ class HedgeBot:
                     self.logger.error("❌ Timeout waiting for trade completion")
                     break
 
-            # Rotate direction for next iteration
-            self.initial_direction = 'buy' if self.initial_direction == 'sell' else 'sell'
-            self.logger.info(f"🔄 Direction rotated to '{self.initial_direction}' for next iteration")
-
     async def run(self):
         """Run the hedge bot."""
         self.setup_signal_handlers()
@@ -829,7 +830,9 @@ def parse_arguments():
     parser.add_argument('--sleep', type=int, default=0,
                         help='Sleep time in seconds after each step (default: 0)')
     parser.add_argument('--direction', type=str, default='buy', choices=['buy', 'sell'],
-                        help='Initial direction for GRVT1 orders: buy or sell (default: buy)')
+                        help='Initial direction for STEP 1: buy or sell (default: buy)')
+    parser.add_argument('--type', type=str, default='single', choices=['single', 'twice'],
+                        help='Trade type: single (open only) or twice (open then close) (default: single)')
 
     return parser.parse_args()
 
@@ -854,7 +857,8 @@ async def main():
         fill_timeout=args.fill_timeout,
         iterations=args.iter,
         sleep_time=args.sleep,
-        initial_direction=args.direction
+        initial_direction=args.direction,
+        trade_type=args.type
     )
 
     await bot.run()
