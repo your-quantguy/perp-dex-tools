@@ -2,6 +2,11 @@
 
 ---
 
+**更新日志**：
+- **2025-12-07**: 新增 `hedge_mode_grvt_grvt.py` 实现 GRVT 账户间对冲功能。当主账户（GRVT1）订单成功后，在另一个 GRVT 账户（GRVT2）下市价对冲单。
+
+---
+
 **English speakers**: Please read README_EN.md for the English version of this documentation.
 
 ## 📢 分享说明
