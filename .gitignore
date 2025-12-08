@@ -199,3 +199,4 @@ cython_debug/
 .github/copilot-instructions.md
 uv.lock
 uv.lock
+.grvt_aster_env
