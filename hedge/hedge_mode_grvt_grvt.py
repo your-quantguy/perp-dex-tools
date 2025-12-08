@@ -409,10 +409,12 @@ class HedgeBot:
         filled_size = Decimal(order_data.get('filled_size', '0'))
         price = Decimal(order_data.get('price', '0'))
 
-        # 确定对冲方向
+        # 更新 GRVT1 仓位
         if side == 'buy':
+            self.grvt1_position += filled_size
             grvt2_side = 'sell'
         else:
+            self.grvt1_position -= filled_size
             grvt2_side = 'buy'
 
         # Store order details for immediate execution
@@ -497,8 +499,17 @@ class HedgeBot:
                 self.logger.error(f"❌ Timeout waiting for GRVT2 order fill after {time.time() - start_time:.1f}s")
                 self.logger.error(f"❌ Order state - Filled: {self.grvt2_order_filled}")
 
-                # Fallback: Mark as filled to continue trading
-                self.logger.warning("⚠️ Using fallback - marking order as filled to continue trading")
+                # Fallback: 手动更新仓位并标记为已成交
+                self.logger.warning("⚠️ Using fallback - manually updating position and marking as filled")
+                
+                # 从 current_grvt2_side 和 current_grvt2_quantity 更新仓位
+                if self.current_grvt2_side and self.current_grvt2_quantity:
+                    if self.current_grvt2_side.lower() == 'buy':
+                        self.grvt2_position += self.current_grvt2_quantity
+                    else:
+                        self.grvt2_position -= self.current_grvt2_quantity
+                    self.logger.warning(f"⚠️ Fallback position update: GRVT2 {self.current_grvt2_side} {self.current_grvt2_quantity}, new position: {self.grvt2_position}")
+                
                 self.grvt2_order_filled = True
                 self.waiting_for_grvt2_fill = False
                 self.order_execution_complete = True
@@ -533,10 +544,7 @@ class HedgeBot:
 
                 # Handle the order update
                 if status == 'FILLED' and self.grvt1_order_status != 'FILLED':
-                    if side == 'buy':
-                        self.grvt1_position += filled_size
-                    else:
-                        self.grvt1_position -= filled_size
+                    # 仓位更新在 handle_grvt1_order_update 中进行，避免重复
                     self.logger.info(f"[{order_id}] [{order_type}] [GRVT1] [{status}]: {filled_size} @ {price}")
                     self.grvt1_order_status = status
 
@@ -604,10 +612,7 @@ class HedgeBot:
 
                 # Handle the order update
                 if status == 'FILLED' and self.grvt2_order_status != 'FILLED':
-                    if side == 'buy':
-                        self.grvt2_position += filled_size
-                    else:
-                        self.grvt2_position -= filled_size
+                    # 仓位更新在 handle_grvt2_order_result 中进行，避免重复
                     self.logger.info(f"[{order_id}] [{order_type}] [GRVT2] [{status}]: {filled_size} @ {price}")
                     self.grvt2_order_status = status
 
