@@ -518,13 +518,39 @@ class HedgeBot:
                 # Fallback: 手动更新仓位并标记为已成交
                 self.logger.warning("⚠️ Using fallback - manually updating position and marking as filled")
                 
-                # 从 current_aster_side 和 current_aster_quantity 更新仓位
-                if self.current_aster_side and self.current_aster_quantity:
-                    if self.current_aster_side.lower() == 'buy':
-                        self.aster_position += self.current_aster_quantity
+                # 尝试获取订单信息以获取实际成交价格
+                try:
+                    order_info = await self.aster_client.get_order_info(order_id)
+                    if order_info and order_info.filled_size > 0:
+                        # 使用实际成交数据
+                        filled_quantity = order_info.filled_size
+                        filled_price = order_info.price
+                        self.logger.info(f"⚠️ Fallback - Retrieved order info: {filled_quantity} @ {filled_price}")
                     else:
-                        self.aster_position -= self.current_aster_quantity
-                    self.logger.warning(f"⚠️ Fallback position update: Aster {self.current_aster_side} {self.current_aster_quantity}, new position: {self.aster_position}")
+                        # 使用预期数据
+                        filled_quantity = self.current_aster_quantity
+                        filled_price = self.current_aster_price
+                        self.logger.warning(f"⚠️ Fallback - Using expected values: {filled_quantity} @ {filled_price}")
+                except Exception as e:
+                    self.logger.error(f"⚠️ Fallback - Failed to get order info: {e}")
+                    filled_quantity = self.current_aster_quantity
+                    filled_price = self.current_aster_price
+                
+                # 从 current_aster_side 和 filled_quantity 更新仓位
+                if self.current_aster_side and filled_quantity:
+                    if self.current_aster_side.lower() == 'buy':
+                        self.aster_position += filled_quantity
+                    else:
+                        self.aster_position -= filled_quantity
+                    self.logger.warning(f"⚠️ Fallback position update: Aster {self.current_aster_side} {filled_quantity}, new position: {self.aster_position}")
+                    
+                    # 记录交易到 CSV
+                    self.log_trade_to_csv(
+                        exchange='ASTER',
+                        side=self.current_aster_side.upper(),
+                        price=str(filled_price),
+                        quantity=str(filled_quantity)
+                    )
                 
                 self.aster_order_filled = True
                 self.waiting_for_aster_fill = False
