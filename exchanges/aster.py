@@ -739,6 +739,33 @@ class AsterClient(BaseExchangeClient):
 
         return Decimal(0)
 
+    @query_retry(reraise=True)
+    async def get_real_position(self) -> Decimal:
+        """Get real account positions from Aster with sign based on positionSide.
+        
+        Returns:
+            Decimal: Position amount with sign (negative for SHORT, positive for LONG)
+        """
+        result = await self._make_request('GET', '/fapi/v2/positionRisk', {'symbol': self.config.contract_id})
+
+        for position in result:
+            if position.get('symbol') == self.config.contract_id:
+                position_amt = Decimal(position.get('positionAmt', 0))
+                position_side = position.get('positionSide', 'BOTH')
+                
+                # 根据 positionSide 确定正负号
+                if position_side == 'SHORT':
+                    # 空仓返回负数
+                    return -abs(position_amt)
+                elif position_side == 'LONG':
+                    # 多仓返回正数
+                    return abs(position_amt)
+                else:
+                    # BOTH 模式或其他情况，使用原始值
+                    return position_amt
+
+        return Decimal(0)
+
     async def get_contract_attributes(self) -> Tuple[str, Decimal]:
         """Get contract ID and tick size for a ticker."""
         ticker = self.config.ticker

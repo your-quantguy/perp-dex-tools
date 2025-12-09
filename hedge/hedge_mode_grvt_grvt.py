@@ -693,6 +693,16 @@ class HedgeBot:
 
         await asyncio.sleep(5)
 
+        # 获取初始持仓并更新本地缓存
+        try:
+            self.logger.info("📊 Fetching initial positions...")
+            self.grvt1_position = await self.grvt1_client.get_real_position()
+            self.grvt2_position = await self.grvt2_client.get_real_position()
+            self.logger.info(f"✅ Initial positions - GRVT1: {self.grvt1_position}, GRVT2: {self.grvt2_position}")
+        except Exception as e:
+            self.logger.error(f"❌ Failed to get initial positions: {e}")
+            self.logger.warning(f"⚠️ Continuing with default positions (0, 0)")
+
         iterations = 0
         while iterations < self.iterations and not self.stop_flag:
             iterations += 1

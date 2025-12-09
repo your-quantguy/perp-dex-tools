@@ -510,6 +510,17 @@ class GrvtClient(BaseExchangeClient):
 
         return Decimal(0)
 
+    async def get_real_position(self) -> Decimal:
+        """Get real position."""
+        # Get real position with side marked
+        positions = self.rest_client.fetch_positions()
+
+        for position in positions:
+            if position.get('instrument') == self.config.contract_id:
+                return Decimal(position.get('size', 0))
+
+        return Decimal(0)
+
     async def get_contract_attributes(self) -> Tuple[str, Decimal]:
         """Get contract ID and tick size for a ticker."""
         ticker = self.config.ticker

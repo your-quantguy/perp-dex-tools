@@ -701,6 +701,16 @@ class HedgeBot:
 
         await asyncio.sleep(5)
 
+        # 获取初始持仓并更新本地缓存
+        try:
+            self.logger.info("📊 Fetching initial positions...")
+            self.grvt_position = await self.grvt_client.get_real_position()
+            self.aster_position = await self.aster_client.get_real_position()
+            self.logger.info(f"✅ Initial positions - GRVT: {self.grvt_position}, Aster: {self.aster_position}")
+        except Exception as e:
+            self.logger.error(f"❌ Failed to get initial positions: {e}")
+            self.logger.warning(f"⚠️ Continuing with default positions (0, 0)")
+
         iterations = 0
         while iterations < self.iterations and not self.stop_flag:
             # Auto 模式下先检查条件，满足才增加 iterations
