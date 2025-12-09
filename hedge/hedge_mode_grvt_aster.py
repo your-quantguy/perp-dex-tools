@@ -33,7 +33,7 @@ class Config:
 class HedgeBot:
     """Trading bot that places post-only orders on GRVT and hedges with market orders on Aster."""
 
-    def __init__(self, ticker: str, order_quantity: Decimal, fill_timeout: int = 5, iterations: int = 20, sleep_time: int = 0, initial_direction: str = 'buy', trade_type: str = 'single'):
+    def __init__(self, ticker: str, order_quantity: Decimal, fill_timeout: int = 5, iterations: int = 20, sleep_time: int = 0, initial_direction: str = 'buy', trade_type: str = 'single', open_rate: Decimal = Decimal('0.001'), close_rate: Decimal = Decimal('-0.001'), max_size: Decimal = Decimal('0')):
         self.ticker = ticker
         self.order_quantity = order_quantity
         self.fill_timeout = fill_timeout
@@ -42,6 +42,9 @@ class HedgeBot:
         self.sleep_time = sleep_time
         self.initial_direction = initial_direction
         self.trade_type = trade_type
+        self.open_rate = open_rate
+        self.close_rate = close_rate
+        self.max_size = max_size
         self.grvt_position = Decimal('0')
         self.aster_position = Decimal('0')
         self.current_order = {}
@@ -323,6 +326,34 @@ class HedgeBot:
 
         return best_bid, best_ask
 
+    async def fetch_aster_bbo_prices(self) -> Tuple[Decimal, Decimal]:
+        """Fetch best bid/ask prices from Aster using REST API."""
+        if not self.aster_client:
+            raise Exception("Aster client not initialized")
+
+        best_bid, best_ask = await self.aster_client.fetch_bbo_prices(self.aster_contract_id)
+
+        return best_bid, best_ask
+
+    async def calculate_spreads(self) -> Tuple[Decimal, Decimal]:
+        """Calculate open_spread and close_spread.
+        
+        Returns:
+            Tuple[Decimal, Decimal]: (open_spread, close_spread)
+            open_spread = (grvt_ask - aster_ask) / grvt_ask
+            close_spread = (grvt_bid - aster_bid) / grvt_bid
+        """
+        grvt_bid, grvt_ask = await self.fetch_grvt_bbo_prices()
+        aster_bid, aster_ask = await self.fetch_aster_bbo_prices()
+
+        if grvt_ask == 0 or grvt_bid == 0:
+            raise Exception("Invalid GRVT prices")
+
+        open_spread = (grvt_ask - aster_ask) / grvt_ask
+        close_spread = (grvt_bid - aster_bid) / grvt_bid
+
+        return open_spread, close_spread
+
     def round_to_tick(self, price: Decimal, tick_size: Decimal) -> Decimal:
         """Round price to tick size."""
         if tick_size is None:
@@ -577,42 +608,27 @@ class HedgeBot:
         def order_update_handler(order_data):
             """Handle order updates from Aster WebSocket."""
             try:
-                order_id = str(order_data.get('i', ''))  # Aster 使用 'i' 作为 orderId
-                status = order_data.get('X', '')  # 'X' 是 order status
-                side = order_data.get('S', '').lower()  # 'S' 是 side
-                filled_size = Decimal(order_data.get('z', '0'))  # 'z' 是 cumulative filled quantity
-                size = Decimal(order_data.get('q', '0'))  # 'q' 是 original quantity
-                price = Decimal(order_data.get('p', '0'))  # 'p' 是 price
+                # Aster WebSocket 传递的是已经处理好的订单数据（来自 aster.py 的 order_update_callback）
+                # 不是原始 WebSocket 消息，所以直接使用标准字段名
+                order_id = str(order_data.get('order_id', ''))
+                status = order_data.get('status', '')
+                side = order_data.get('side', '').lower()
+                filled_size = Decimal(order_data.get('filled_size', '0'))
+                size = Decimal(order_data.get('size', '0'))
+                price = Decimal(order_data.get('price', '0'))
 
-                if side == 'buy':
-                    order_type = "CLOSE"
-                else:
-                    order_type = "OPEN"
+                # 使用 order_data 中的 order_type（aster.py 已经计算好了）
+                order_type = order_data.get('order_type', 'UNKNOWN')
                 
-                # Aster 状态映射
-                status_map = {
-                    'NEW': 'NEW',
-                    'PARTIALLY_FILLED': 'PARTIALLY_FILLED',
-                    'FILLED': 'FILLED',
-                    'CANCELED': 'CANCELED',
-                    'EXPIRED': 'EXPIRED'
-                }
-                
-                mapped_status = status_map.get(status, status)
+                # status 已经在 aster.py 中映射过了（NEW -> OPEN 等）
+                mapped_status = status
 
                 # Handle the order update
                 if mapped_status == 'FILLED' and self.aster_order_status != 'FILLED':
                     self.logger.info(f"[{order_id}] [{order_type}] [ASTER] [{mapped_status}]: {filled_size} @ {price}")
                     self.aster_order_status = mapped_status
 
-                    # Log Aster trade to CSV
-                    self.log_trade_to_csv(
-                        exchange='ASTER',
-                        side=side,
-                        price=str(price),
-                        quantity=str(filled_size)
-                    )
-
+                    # CSV 记录在 handle_aster_order_result 中进行，避免重复
                     self.handle_aster_order_result({
                         'order_id': order_id,
                         'side': side,
@@ -687,9 +703,12 @@ class HedgeBot:
 
         iterations = 0
         while iterations < self.iterations and not self.stop_flag:
-            iterations += 1
+            # Auto 模式下先检查条件，满足才增加 iterations
+            if self.trade_type != 'auto':
+                iterations += 1
+            
             self.logger.info("-----------------------------------------------")
-            self.logger.info(f"🔄 Trading loop iteration {iterations}")
+            self.logger.info(f"🔄 Trading loop iteration {iterations + 1 if self.trade_type == 'auto' else iterations}")
             self.logger.info("-----------------------------------------------")
 
             self.logger.info(f"[STEP 1] GRVT position: {self.grvt_position} | Aster position: {self.aster_position}")
@@ -698,11 +717,47 @@ class HedgeBot:
                 self.logger.error(f"❌ Position diff is too large: {self.grvt_position + self.aster_position}")
                 break
 
+            # Auto 模式：根据价差决定交易方向
+            if self.trade_type == 'auto':
+                try:
+                    open_spread, close_spread = await self.calculate_spreads()
+                    self.logger.info(f"📊 Spreads - Open: {open_spread:.6f} (threshold: {self.open_rate}), Close: {close_spread:.6f} (threshold: {self.close_rate})")
+
+                    # 判断是否满足开仓条件
+                    if open_spread > self.open_rate:
+                        side = 'sell'
+                        # 检查 max_size 限制（仅在 max_size > 0 时生效）
+                        if self.max_size > 0 and self.grvt_position <= -self.max_size:
+                            self.logger.info(f"⚠️ Max size limit reached: GRVT position {self.grvt_position} <= -{self.max_size}, skipping SELL")
+                            await asyncio.sleep(3)
+                            continue
+                        self.logger.info(f"✅ Open spread condition met: {open_spread:.6f} > {self.open_rate}, direction: SELL")
+                        iterations += 1  # 满足条件才增加计数
+                    elif close_spread < self.close_rate:
+                        side = 'buy'
+                        # 检查 max_size 限制（仅在 max_size > 0 时生效）
+                        if self.max_size > 0 and self.grvt_position >= self.max_size:
+                            self.logger.info(f"⚠️ Max size limit reached: GRVT position {self.grvt_position} >= {self.max_size}, skipping BUY")
+                            await asyncio.sleep(3)
+                            continue
+                        self.logger.info(f"✅ Close spread condition met: {close_spread:.6f} < {self.close_rate}, direction: BUY")
+                        iterations += 1  # 满足条件才增加计数
+                    else:
+                        self.logger.info(f"⏭️ No condition met, waiting 3 seconds...")
+                        await asyncio.sleep(3)
+                        continue
+                except Exception as e:
+                    self.logger.error(f"❌ Error calculating spreads: {e}")
+                    await asyncio.sleep(3)
+                    continue
+            else:
+                # Single/Twice 模式：使用 initial_direction
+                side = self.initial_direction
+
             self.order_execution_complete = False
             self.waiting_for_aster_fill = False
             try:
                 # Open position
-                side = self.initial_direction
                 await self.place_grvt_post_only_order(side, self.order_quantity)
             except Exception as e:
                 self.logger.error(f"⚠️ Error in trading loop: {e}")
@@ -733,9 +788,9 @@ class HedgeBot:
                 self.logger.info(f"💤 Sleeping {self.sleep_time} seconds after STEP 1...")
                 await asyncio.sleep(self.sleep_time)
 
-            # 如果是 single 模式，跳过 STEP 2 和 STEP 3
-            if self.trade_type == 'single':
-                self.logger.info(f"[SINGLE MODE] Skipping close position steps")
+            # 如果是 single 或 auto 模式，跳过 STEP 2 和 STEP 3
+            if self.trade_type in ['single', 'auto']:
+                self.logger.info(f"[{self.trade_type.upper()} MODE] Skipping close position steps")
                 continue
 
             # Close position (仅在 twice 模式执行)
@@ -828,8 +883,14 @@ def parse_arguments():
                         help='Sleep time in seconds after each step (default: 0)')
     parser.add_argument('--direction', type=str, default='buy', choices=['buy', 'sell'],
                         help='Initial direction for STEP 1: buy or sell (default: buy)')
-    parser.add_argument('--type', type=str, default='single', choices=['single', 'twice'],
-                        help='Trade type: single (open only) or twice (open then close) (default: single)')
+    parser.add_argument('--type', type=str, default='single', choices=['single', 'twice', 'auto'],
+                        help='Trade type: single (open only), twice (open then close), or auto (based on spread) (default: single)')
+    parser.add_argument('--open-rate', type=str, default='0.001',
+                        help='Open rate threshold for auto mode (default: 0.001)')
+    parser.add_argument('--close-rate', type=str, default='-0.001',
+                        help='Close rate threshold for auto mode (default: -0.001)')
+    parser.add_argument('--max-size', type=str, default='0',
+                        help='Max position size limit for auto mode (default: 0, no limit). Position must be <= max_size and >= -max_size')
 
     return parser.parse_args()
 
@@ -855,7 +916,10 @@ async def main():
         iterations=args.iter,
         sleep_time=args.sleep,
         initial_direction=args.direction,
-        trade_type=args.type
+        trade_type=args.type,
+        open_rate=Decimal(args.open_rate),
+        close_rate=Decimal(args.close_rate),
+        max_size=Decimal(args.max_size)
     )
 
     await bot.run()
