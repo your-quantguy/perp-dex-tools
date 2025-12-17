@@ -49,13 +49,9 @@ class HedgeBot:
         soft_unhedged_pos: float = 0.02,
         max_unhedged_pos: float = 0.03,
         max_unhedged_ms: int = 1000,
-        max_extended_position: float = 0.05,
-        entry_skip_sleep_base: float = 0.5,
-        entry_skip_sleep_max: float = 5.0,
         unwind_trigger_bps: float = -0.3,
         unwind_confirm_count: int = 3,
         unwind_cooldown_ms: int = 5000,
-        enable_unwind: bool = False,
         hedge_ioc: bool = False,
         ioc_tick_offset: int = 2,
         ioc_max_retries: int = 3,
@@ -78,13 +74,9 @@ class HedgeBot:
         self.soft_unhedged_pos = Decimal(str(soft_unhedged_pos))
         self.max_unhedged_pos = Decimal(str(max_unhedged_pos))
         self.max_unhedged_ms = max_unhedged_ms
-        self.max_extended_position = Decimal(str(max_extended_position))
-        self.entry_skip_sleep_base = entry_skip_sleep_base
-        self.entry_skip_sleep_max = entry_skip_sleep_max
         self.unwind_trigger_bps = Decimal(str(unwind_trigger_bps))
         self.unwind_confirm_count = unwind_confirm_count
         self.unwind_cooldown_ms = unwind_cooldown_ms
-        self.enable_unwind = enable_unwind
         self.hedge_ioc = hedge_ioc
         self.ioc_tick_offset = Decimal(str(ioc_tick_offset))
         self.ioc_max_retries = ioc_max_retries
@@ -96,13 +88,9 @@ class HedgeBot:
         self.unwind_cooldown_until_ms = 0
         self.unwind_edge_bad_count = 0
         self.hedged_qty_by_order = defaultdict(Decimal)
-        self.filled_total_by_ext_order = defaultdict(Decimal)
+
         self.hedge_lock = asyncio.Lock()
         self.unwind_lock = asyncio.Lock()
-        self.hedge_task = None
-        self.unwind_task = None
-        self.entry_skip_count = 0
-        self.hedge_fail_count = 0
 
         # Initialize logging to file
         os.makedirs("logs", exist_ok=True)
@@ -422,15 +410,15 @@ class HedgeBot:
 
     def edge_exit_bps_for_unhedged(self, unhedged_pos: Decimal) -> Decimal:
         mid = self.choose_mid_price()
-        ext_mid = None
-        if self.extended_best_bid and self.extended_best_ask:
-            ext_mid = (self.extended_best_bid + self.extended_best_ask) / Decimal("2")
-        if ext_mid is None:
-            ext_mid = mid
+
         if unhedged_pos > 0:
-            edge = (self.lighter_best_bid - ext_mid) / mid * Decimal("1e4")
+            if self.extended_best_bid is None:
+                raise ValueError("Extended best bid missing")
+            edge = (self.extended_best_bid - self.lighter_best_ask) / mid * Decimal("1e4")
         else:
-            edge = (ext_mid - self.lighter_best_ask) / mid * Decimal("1e4")
+            if self.extended_best_ask is None:
+                raise ValueError("Extended best ask missing")
+            edge = (self.lighter_best_bid - self.extended_best_ask) / mid * Decimal("1e4")
         return edge
 
     def exit_edge_bps_for_unwind(self) -> Decimal:
@@ -580,10 +568,8 @@ class HedgeBot:
                                     if best_ask is not None:
                                         self.lighter_best_ask = best_ask[0]
 
-                                    if not self.hedge_task or self.hedge_task.done():
-                                        self.hedge_task = asyncio.create_task(self.maybe_hedge_unhedged_pos(reason="L2_UPDATE"))
-                                    if not self.unwind_task or self.unwind_task.done():
-                                        self.unwind_task = asyncio.create_task(self.maybe_unwind_hedged_pos(source="L2_UPDATE"))
+                                    asyncio.create_task(self.maybe_hedge_unhedged_pos(reason="L2_UPDATE"))
+                                    asyncio.create_task(self.maybe_unwind_hedged_pos(source="L2_UPDATE"))
 
                                 elif data.get("type") == "ping":
                                     # Respond to ping with pong
@@ -773,15 +759,10 @@ class HedgeBot:
 
         self.extended_order_status = None
         now_ms = int(time.time() * 1000)
-        if abs(self.unhedged_pos) >= self.soft_unhedged_pos:
-            self.logger.info("RISK_GUARD: unhedged too high, skip entry")
-            self.log_event("ENTRY_SKIP", "RISK_GUARD", Decimal("0"), Decimal("0"), self.unhedged_pos, self.unhedged_pos, 0)
-            await asyncio.sleep(1)
-            return False
         if now_ms < self.unwind_cooldown_until_ms:
             self.logger.info("COOLDOWN_SKIP: entry blocked due to unwind cooldown")
             self.log_event("ENTRY_SKIP", "COOLDOWN_SKIP", Decimal("0"), Decimal("0"), self.unhedged_pos, self.unhedged_pos, 0)
-            return False
+            return
 
         # Determine tentative post price using current best quotes
         best_bid, best_ask = await self.fetch_extended_bbo_prices()
@@ -790,13 +771,8 @@ class HedgeBot:
         if edge_bps < self.entry_bps:
             self.logger.info(f"ENTRY_GATE_SKIP: edge {edge_bps:.4f} < entry_bps {self.entry_bps}")
             self.log_event("ENTRY_SKIP", "ENTRY_GATE_SKIP", edge_bps, Decimal("0"), self.unhedged_pos, self.unhedged_pos, 0)
-            self.entry_skip_count += 1
-            sleep_for = min(self.entry_skip_sleep_max,
-                             self.entry_skip_sleep_base * (2 ** min(self.entry_skip_count, 3))) + Decimal(str(random.uniform(0, 0.2)))
-            await asyncio.sleep(float(sleep_for))
-            return False
+            return
 
-        self.entry_skip_count = 0
         self.logger.info(f"[OPEN] [Extended] [{side}] Placing Extended POST-ONLY order with edge {edge_bps:.4f} bps")
         order_id, order_price = await self.place_bbo_order(side, quantity)
 
@@ -929,29 +905,25 @@ class HedgeBot:
         oid = order_data.get('order_id')
         now_ms = int(time.time() * 1000)
 
-        delta = filled_size - self.filled_total_by_ext_order[oid]
+        delta = filled_size - self.hedged_qty_by_order[oid]
         if delta <= 0:
             return
 
-        self.filled_total_by_ext_order[oid] = filled_size
+        self.hedged_qty_by_order[oid] = filled_size
 
         if side == 'buy':
-            self.extended_position += delta
             self.unhedged_pos += delta
         else:
-            self.extended_position -= delta
             self.unhedged_pos -= delta
 
         if self.unhedged_since_ms is None and self.unhedged_pos != 0:
             self.unhedged_since_ms = now_ms
 
-        if not self.hedge_task or self.hedge_task.done():
-            self.hedge_task = asyncio.create_task(self.maybe_hedge_unhedged_pos(reason="EXT_FILL"))
+        asyncio.create_task(self.maybe_hedge_unhedged_pos(reason="EXT_FILL"))
 
     async def maybe_hedge_unhedged_pos(self, reason: str):
         async with self.hedge_lock:
             if self.unhedged_pos == 0:
-                self.unhedged_since_ms = None
                 return
 
             now_ms = int(time.time() * 1000)
@@ -967,20 +939,20 @@ class HedgeBot:
             reason_code = reason
             if edge_bps >= self.exit_good_bps:
                 qty = abs_pos
-                reason_code = "GOOD_EDGE_FULL_HEDGE"
+                reason_code = "GOOD_EDGE"
             elif edge_bps >= self.exit_ok_bps:
                 qty = max(Decimal("0"), abs_pos - self.soft_unhedged_pos)
-                reason_code = "OK_EDGE_TO_SOFT"
+                reason_code = "OK_EDGE"
             else:
                 if abs_pos > self.max_unhedged_pos:
                     qty = abs_pos - self.max_unhedged_pos
-                    reason_code = "HARD_LIMIT_FORCE"
+                    reason_code = "HARD_LIMIT"
                 elif age_ms > self.max_unhedged_ms:
                     qty = max(Decimal("0"), abs_pos - self.soft_unhedged_pos)
-                    reason_code = "TIMEOUT_FORCE"
+                    reason_code = "TIMEOUT"
                 else:
                     qty = Decimal("0")
-                    reason_code = "WAIT_EDGE_BAD"
+                    reason_code = "WAIT"
 
             unhedged_before = self.unhedged_pos
             if qty > 0:
@@ -988,7 +960,6 @@ class HedgeBot:
                 if self.hedge_ioc:
                     success = await self.place_lighter_ioc_progressive(lighter_side, qty)
                     if not success:
-                        self.hedge_fail_count += 1
                         self.log_event("HEDGE_SKIP", "IOC_FAIL", edge_bps, qty, unhedged_before, self.unhedged_pos, age_ms)
                         return
                 else:
@@ -1005,8 +976,6 @@ class HedgeBot:
 
                 if self.unhedged_pos == 0:
                     self.unhedged_since_ms = None
-                    self.hedged_pos += qty
-                    self.hedge_fail_count = 0
 
                 self.log_event("HEDGE_EXEC", reason_code, edge_bps, qty, unhedged_before, self.unhedged_pos, age_ms)
             else:
@@ -1014,9 +983,7 @@ class HedgeBot:
 
     async def maybe_unwind_hedged_pos(self, source: str):
         async with self.unwind_lock:
-            if not self.enable_unwind:
-                return
-            if self.hedged_pos == 0 or self.unhedged_pos != 0:
+            if self.hedged_pos == 0:
                 return
             now_ms = int(time.time() * 1000)
             if now_ms < self.unwind_cooldown_until_ms:
