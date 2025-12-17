@@ -60,6 +60,31 @@ Examples:
                         help=".env file path (default: .env)")
     parser.add_argument('--max-position', type=Decimal, default=Decimal('0'),
                         help='Maximum position to hold (default: 0)')
+    parser.add_argument('--entry-bps', type=float, default=2.0,
+                        help='Entry threshold in bps (default: 2.0)')
+    parser.add_argument('--exit-good-bps', type=float, default=0.0,
+                        help='Exit edge threshold good (default: 0.0)')
+    parser.add_argument('--exit-ok-bps', type=float, default=-0.5,
+                        help='Exit edge threshold ok (default: -0.5)')
+    parser.add_argument('--exit-bad-bps', type=float, default=-1.0,
+                        help='Exit edge threshold bad (default: -1.0)')
+    parser.add_argument('--soft-unhedged-pos', type=float, default=0.02,
+                        help='Soft limit for unhedged position (default: 0.02)')
+    parser.add_argument('--max-unhedged-pos', type=float, default=0.03,
+                        help='Hard limit for unhedged position (default: 0.03)')
+    parser.add_argument('--max-unhedged-ms', type=int, default=1000,
+                        help='Max age for unhedged position in ms (default: 1000)')
+    parser.add_argument('--unwind-trigger-bps', type=float, default=-0.3,
+                        help='Trigger edge for unwind (default: -0.3)')
+    parser.add_argument('--unwind-confirm-count', type=int, default=3,
+                        help='Confirm count for unwind (default: 3)')
+    parser.add_argument('--unwind-cooldown-ms', type=int, default=5000,
+                        help='Cooldown after unwind in ms (default: 5000)')
+    parser.add_argument('--hedge-ioc', action='store_true', help='Use IOC orders for hedging')
+    parser.add_argument('--ioc-tick-offset', type=int, default=2,
+                        help='Tick offset for IOC progression (default: 2)')
+    parser.add_argument('--ioc-max-retries', type=int, default=3,
+                        help='Max retries for IOC progression (default: 3)')
     
     return parser.parse_args()
 
@@ -141,7 +166,20 @@ async def main():
                 order_quantity=Decimal(args.size),
                 fill_timeout=args.fill_timeout,
                 iterations=args.iter,
-                sleep_time=args.sleep
+                sleep_time=args.sleep,
+                entry_bps=args.entry_bps,
+                exit_good_bps=args.exit_good_bps,
+                exit_ok_bps=args.exit_ok_bps,
+                exit_bad_bps=args.exit_bad_bps,
+                soft_unhedged_pos=args.soft_unhedged_pos,
+                max_unhedged_pos=args.max_unhedged_pos,
+                max_unhedged_ms=args.max_unhedged_ms,
+                unwind_trigger_bps=args.unwind_trigger_bps,
+                unwind_confirm_count=args.unwind_confirm_count,
+                unwind_cooldown_ms=args.unwind_cooldown_ms,
+                hedge_ioc=args.hedge_ioc,
+                ioc_tick_offset=args.ioc_tick_offset,
+                ioc_max_retries=args.ioc_max_retries,
             )
         
         # Run the bot
