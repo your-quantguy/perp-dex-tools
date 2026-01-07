@@ -1,0 +1,363 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Ethereal Linked Signer EIP-712</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 900px; margin: 24px auto; padding: 0 16px; color: #111; background: #f7f7fb; }
+    h1 { margin-bottom: 4px; }
+    small { color: #555; }
+    fieldset { border: 1px solid #ccc; padding: 12px 16px; margin-bottom: 12px; background: #fff; }
+    label { display: block; font-weight: 600; margin-top: 10px; }
+    input { width: 100%; padding: 8px; margin-top: 4px; box-sizing: border-box; }
+    button { padding: 10px 14px; margin-top: 12px; cursor: pointer; }
+    code, pre { background: #f0f0f3; padding: 6px; display: block; white-space: pre-wrap; word-break: break-all; }
+    .row { display: flex; gap: 12px; }
+    .row > div { flex: 1; }
+    #status { margin-top: 8px; color: #0a5; font-weight: 600; }
+    #error { margin-top: 8px; color: #c00; font-weight: 600; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>
+</head>
+<body>
+  <h1>Ethereal Linked Signer EIP-712</h1>
+  <small>Connect MetaMask, fill signer + subaccount info, then sign typed data for /linked-signer/link.</small>
+
+  <fieldset>
+    <button id="connect">Connect MetaMask</button>
+    <div id="status">Not connected</div>
+    <div id="error"></div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Message</legend>
+    <label>sender (auto from connected wallet)</label>
+    <input id="sender" readonly placeholder="Connect wallet first">
+
+    <label>subaccount address (linked signer)</label>
+    <input id="signer" placeholder="0x...">
+
+    <label>subaccount label (默认 primary，最好不要修改)</label>
+    <input id="subaccountLabel" value="primary" readonly>
+
+    <div class="row">
+      <div>
+        <label>signedAt (seconds)</label>
+        <input id="signedAt" type="number">
+      </div>
+      <div>
+        <label>nonce (uint64 as string, e.g. nanos)</label>
+        <input id="nonce">
+      </div>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Action</legend>
+    <button id="sign">Sign Typed Data (eth_signTypedData_v4)</button>
+    <label>Signature</label>
+    <code id="signature"></code>
+  </fieldset>
+
+  <fieldset>
+    <legend>Send to Ethereal API</legend>
+    <label>API Base URL</label>
+    <input id="apiBase" value="https://api.ethereal.trade">
+
+    <label>subaccountId (UUID from query API)</label>
+    <input id="subaccountId">
+
+    <label>生成 signerSignature 的命令（linked signer 私钥本地运行）</label>
+    <pre id="cliSnippet"></pre>
+
+    <label>signerSignature (填入上面命令的输出，自动验证)</label>
+    <input id="signerSignature" placeholder="0x...">
+    <div id="signerSigStatus"></div>
+
+    <button id="send">Link Subaccount</button>
+    <div id="apiStatus"></div>
+  </fieldset>
+
+  <script>
+    const statusEl = document.getElementById("status");
+    const errorEl = document.getElementById("error");
+    const senderEl = document.getElementById("sender");
+    const signerEl = document.getElementById("signer");
+    const subLabelEl = document.getElementById("subaccountLabel");
+    const signedAtEl = document.getElementById("signedAt");
+    const nonceEl = document.getElementById("nonce");
+    const sigEl = document.getElementById("signature");
+    const cliSnippetEl = document.getElementById("cliSnippet");
+    const signerSigStatusEl = document.getElementById("signerSigStatus");
+    const apiStatusEl = document.getElementById("apiStatus");
+    let lastTypedMessage = null;
+    let lastTypedDomain = null;
+    let lastSignature = "";
+    let signerSigValid = false;
+    const domainDefaults = {
+      name: "Ethereal",
+      version: "1",
+      chainId: 5064014,
+      verifyingContract: "0xb3cdc82035c495c484c9ff11ed5f3ff6d342e3cc",
+    };
+
+    function showError(msg) {
+      errorEl.textContent = msg || "";
+    }
+
+    function toBytes32Padded(label) {
+      const encoder = new TextEncoder(); // UTF-8
+      const bytes = encoder.encode(label);
+
+      if (bytes.length > 32) {
+        throw new Error("String too long for bytes32");
+      }
+
+      const padded = new Uint8Array(32);
+      padded.set(bytes);
+
+      return "0x" + [...padded]
+        .map(b => b.toString(16).padStart(2, "0"))
+        .join("");
+    }
+
+    function autoFillTime() {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const nowNanos = BigInt(Date.now()) * 1000000n + BigInt(Math.floor(Math.random() * 1_000_000));
+      signedAtEl.value = nowSec.toString();
+      nonceEl.value = nowNanos.toString();
+    }
+
+    async function connectWallet() {
+      showError("");
+      if (!window.ethereum) {
+        showError("MetaMask not detected.");
+        return;
+      }
+      const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
+      const account = window.ethers && window.ethers.utils ? window.ethers.utils.getAddress(accounts[0]) : accounts[0];
+      senderEl.value = account;
+      statusEl.textContent = `Connected: ${account}`;
+    }
+
+    function buildTypedData() {
+      const domain = { ...domainDefaults };
+
+      const subLabel = (subLabelEl.value || "primary").trim();
+      if (!subLabel) throw new Error("Subaccount label is required");
+      const subaccount = toBytes32Padded(subLabel);
+
+      const signerAddrInput = (signerEl.value || "").trim();
+      const signerAddr = window.ethers && window.ethers.utils ? window.ethers.utils.getAddress(signerAddrInput) : signerAddrInput;
+      if (!signerAddr) throw new Error("Signer address is required");
+      if (!senderEl.value) throw new Error("Connect wallet to populate sender");
+
+      const signedAtVal = signedAtEl.value ? Math.floor(Number(signedAtEl.value)) : 0;
+      const nonceVal = nonceEl.value ? nonceEl.value.toString() : "0";
+
+      const message = {
+        sender: senderEl.value,
+        signer: signerAddr,
+        subaccount,
+        nonce: nonceVal,
+        signedAt: signedAtVal
+      };
+
+      const types = {
+        EIP712Domain: [
+          { name: "name", type: "string" },
+          { name: "version", type: "string" },
+          { name: "chainId", type: "uint256" },
+          { name: "verifyingContract", type: "address" },
+        ],
+        LinkSigner: [
+          { name: "sender", type: "address" },
+          { name: "signer", type: "address" },
+          { name: "subaccount", type: "bytes32" },
+          { name: "nonce", type: "uint64" },
+          { name: "signedAt", type: "uint64" },
+        ],
+      };
+
+      const typedData = {
+        types,
+        primaryType: "LinkSigner",
+        domain,
+        message,
+      };
+      return typedData;
+    }
+
+    async function signTypedData() {
+      showError("");
+      sigEl.textContent = "";
+      autoFillTime(); // auto-fill time and nonce on sign
+      if (!window.ethereum) {
+        showError("MetaMask not detected.");
+        return;
+      }
+      if (!senderEl.value) {
+        showError("Connect wallet first.");
+        return;
+      }
+      try {
+        const typedData = buildTypedData();
+        const params = [senderEl.value, JSON.stringify(typedData)];
+        const signature = await window.ethereum.request({
+          method: "eth_signTypedData_v4",
+          params,
+        });
+        sigEl.textContent = signature;
+        lastTypedMessage = typedData.message;
+        lastTypedDomain = typedData.domain;
+        lastSignature = signature;
+        buildApiPayloadPreview(signature, typedData.message);
+        await autoFetchSubaccountId();
+      } catch (err) {
+        showError(err.message || String(err));
+      }
+    }
+
+    function buildApiPayloadPreview(signature, messageOverride) {
+      const msg = messageOverride || lastTypedMessage || buildTypedData().message;
+      const payload = {
+        signature,
+        signerSignature: document.getElementById("signerSignature").value || undefined,
+        data: {
+          subaccountId: document.getElementById("subaccountId").value || undefined,
+          sender: msg.sender,
+          subaccount: msg.subaccount,
+          signer: msg.signer,
+          nonce: msg.nonce,
+          signedAt: msg.signedAt,
+        },
+      };
+      // Remove undefined fields for clarity
+      const cleaned = JSON.parse(JSON.stringify(payload, (k, v) => v === undefined ? undefined : v));
+      renderCliSnippet(cleaned);
+      return cleaned;
+    }
+
+    function renderCliSnippet(payload) {
+      const { data, signature, signerSignature } = payload;
+      if (!data) return;
+      const lines = [
+        "python ./helpers/ethereal/sign_linked_signer.py \\",
+        `  --sender ${data.sender || "<sender>"} \\`,
+        `  --subaccount ${data.subaccount || "<bytes32_subaccount>"} \\`,
+        `  --nonce ${data.nonce || "<nonce>"} \\`,
+        `  --signed-at ${data.signedAt || "<signedAt>"}`
+      ];
+      cliSnippetEl.textContent = lines.join("\n");
+    }
+
+    async function verifySignerSignature() {
+      signerSigStatusEl.textContent = "";
+      signerSigStatusEl.style.color = "#111";
+      signerSigValid = false;
+      try {
+        if (!window.ethers || !window.ethers.utils) {
+          throw new Error("ethers.js not loaded");
+        }
+        const sig = document.getElementById("signerSignature").value.trim();
+        if (!sig) throw new Error("signerSignature is empty");
+        const typed = lastTypedMessage
+          ? { domain: lastTypedDomain || buildTypedData().domain, message: lastTypedMessage }
+          : buildTypedData();
+        const { domain, message } = typed;
+        const typesNoDomain = {
+          LinkSigner: [
+            { name: "sender", type: "address" },
+            { name: "signer", type: "address" },
+            { name: "subaccount", type: "bytes32" },
+            { name: "nonce", type: "uint64" },
+            { name: "signedAt", type: "uint64" },
+          ],
+        };
+        const recovered = window.ethers.utils.verifyTypedData(domain, typesNoDomain, message, sig);
+        if (recovered.toLowerCase() === message.signer.toLowerCase()) {
+          signerSigStatusEl.textContent = `signerSignature valid (recovered ${recovered})`;
+          signerSigStatusEl.style.color = "#0a5";
+          signerSigValid = true;
+        } else {
+          signerSigStatusEl.textContent = `signerSignature mismatch: recovered ${recovered}, expected ${message.signer}`;
+          signerSigStatusEl.style.color = "#c00";
+          signerSigValid = false;
+        }
+      } catch (err) {
+        signerSigStatusEl.textContent = err.message || String(err);
+        signerSigStatusEl.style.color = "#c00";
+        signerSigValid = false;
+      }
+    }
+
+    async function sendToApi(ignoreSigCheck = false) {
+      showError("");
+      apiStatusEl.textContent = "";
+      if (!sigEl.textContent && !ignoreSigCheck) {
+        showError("Please sign first to populate signature.");
+        return;
+      }
+      const signerSig = document.getElementById("signerSignature").value.trim();
+      if (!signerSig) {
+        showError("signerSignature is required.");
+        return;
+      }
+      await verifySignerSignature();
+      if (!signerSigValid) {
+        showError("signerSignature invalid. Please check the linked signer signature.");
+        return;
+      }
+      if (!document.getElementById("subaccountId").value) {
+        showError("subaccountId is required. Fetch or fill it first.");
+        return;
+      }
+      const signature = sigEl.textContent || lastSignature;
+      const payload = buildApiPayloadPreview(signature, lastTypedMessage);
+      const base = document.getElementById("apiBase").value.replace(/\/$/, "");
+      const url = `${base}/v1/linked-signer/link`;
+      try {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "accept": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const text = await res.text();
+        if (res.ok) {
+          apiStatusEl.textContent = "Link success";
+          apiStatusEl.style.color = "#0a5";
+        } else {
+          apiStatusEl.textContent = `HTTP ${res.status}: ${text}`;
+          apiStatusEl.style.color = "#c00";
+        }
+      } catch (err) {
+        showError(err.message || err);
+        apiStatusEl.textContent = err.message || String(err);
+        apiStatusEl.style.color = "#c00";
+      }
+    }
+
+    document.getElementById("connect").addEventListener("click", connectWallet);
+    document.getElementById("sign").addEventListener("click", signTypedData);
+    document.getElementById("send").addEventListener("click", sendToApi);
+    document.getElementById("signerSignature").addEventListener("input", verifySignerSignature);
+    autoFillTime();
+
+    async function autoFetchSubaccountId() {
+      const sender = senderEl.value;
+      if (!sender) return;
+      const base = document.getElementById("apiBase").value.replace(/\/$/, "");
+      const url = `${base}/v1/subaccount?sender=${encodeURIComponent(sender)}`;
+      try {
+        const res = await fetch(url, { headers: { accept: "application/json" } });
+        const json = await res.json();
+        if (json && json.data && json.data.length > 0 && json.data[0].id) {
+          document.getElementById("subaccountId").value = json.data[0].id;
+        }
+      } catch (err) {
+        // silent
+      }
+    }
+  </script>
+</body>
+</html>

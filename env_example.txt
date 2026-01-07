@@ -53,6 +53,14 @@ APEX_OMNI_KEY_SEED=your_apex_omni_key_seed
 NADO_PRIVATE_KEY=your_nado_private_key_here
 NADO_MODE=MAINNET  # or DEVNET
 
+# Ethereal Configuration
+ETHEREAL_BASE_URL=https://api.ethereal.trade
+ETHEREAL_RPC_URL=https://rpc.ethereal.trade
+ETHEREAL_CHAIN_ID=42161
+ETHEREAL_PRIVATE_KEY=your_private_key # required for signing orders
+ETHEREAL_SUBACCOUNT_ID=your_subaccount_id
+ETHEREAL_ACCOUNT_NAME=primary
+
 # Notification (optional)
 # guide: https://www.feishu.cn/hc/zh-CN/articles/185289387886-%E6%B6%88%E6%81%AF%E5%8A%A9%E6%89%8B-%E6%9C%BA%E5%99%A8%E4%BA%BA
 LARK_TOKEN=
