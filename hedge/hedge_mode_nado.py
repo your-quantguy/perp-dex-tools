@@ -13,39 +13,42 @@ from decimal import Decimal
 from typing import Tuple
 
 from lighter.signer_client import SignerClient
+import sys
+import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from exchanges.apex import ApexClient
+from exchanges.nado import NadoClient
 import websockets
 from datetime import datetime
 import pytz
 
-
 class Config:
-    """Simple config class to wrap dictionary for Apex client."""
+    """Simple config class to wrap dictionary for Nado client."""
     def __init__(self, config_dict):
         for key, value in config_dict.items():
             setattr(self, key, value)
 
 
 class HedgeBot:
-    """Trading bot that places post-only orders on Apex and hedges with market orders on Lighter."""
+    """Trading bot that places post-only orders on Nado and hedges with market orders on Lighter."""
 
-    def __init__(self, ticker: str, order_quantity: Decimal, fill_timeout: int = 5, iterations: int = 20, sleep_time: int = 0):
+    def __init__(self, ticker: str, order_quantity: Decimal, fill_timeout: int = 5, iterations: int = 20, sleep_time: int = 0, max_position: Decimal = Decimal('0')):
         self.ticker = ticker
         self.order_quantity = order_quantity
         self.fill_timeout = fill_timeout
         self.lighter_order_filled = False
         self.iterations = iterations
         self.sleep_time = sleep_time
-        self.apex_position = Decimal('0')
-        self.lighter_position = Decimal('0')
         self.current_order = {}
+        if max_position == Decimal('0'):
+            self.max_position = order_quantity
+        else:
+            self.max_position = max_position        
 
         # Initialize logging to file
         os.makedirs("logs", exist_ok=True)
-        self.log_filename = f"logs/apex_{ticker}_hedge_mode_log.txt"
-        self.csv_filename = f"logs/apex_{ticker}_hedge_mode_trades.csv"
+        self.log_filename = f"logs/nado_{ticker}_hedge_mode_log.txt"
+        self.csv_filename = f"logs/nado_{ticker}_hedge_mode_trades.csv"
         self.original_stdout = sys.stdout
 
         # Initialize CSV file with headers if it doesn't exist
@@ -89,14 +92,17 @@ class HedgeBot:
         self.stop_flag = False
         self.order_counter = 0
 
-        # Apex state
-        self.apex_client = None
-        self.apex_contract_id = None
-        self.apex_tick_size = None
-        self.apex_order_status = None
+        # Nado state
+        self.nado_client = None
+        self.nado_contract_id = None
+        self.nado_tick_size = None
+        self.nado_order_status = None
+        self.nado_position = Decimal(0)
 
-        # Apex order book state (not used since we use REST API for BBO)
-        # Keeping variables for potential future use but not initializing them
+        # Nado order book state for REST API-based BBO
+        self.nado_best_bid = None
+        self.nado_best_ask = None
+        self.nado_order_book_ready = False
 
         # Lighter order book state
         self.lighter_client = None
@@ -138,26 +144,20 @@ class HedgeBot:
         self.account_index = int(os.getenv('LIGHTER_ACCOUNT_INDEX'))
         self.api_key_index = int(os.getenv('LIGHTER_API_KEY_INDEX'))
 
-        # Apex configuration
-        self.apex_api_key = os.getenv('APEX_API_KEY')
-        self.apex_api_key_passphrase = os.getenv('APEX_API_KEY_PASSPHRASE')
-        self.apex_api_key_secret = os.getenv('APEX_API_KEY_SECRET')
-        self.apex_omni_key_seed = os.getenv('APEX_OMNI_KEY_SEED')
-        self.apex_environment = os.getenv('APEX_ENVIRONMENT', 'prod')
+        # Nado configuration
+        self.nado_private_key = os.getenv('NADO_PRIVATE_KEY')
 
     def shutdown(self, signum=None, frame=None):
         """Graceful shutdown handler."""
         self.stop_flag = True
         self.logger.info("\n🛑 Stopping...")
 
-        # Close WebSocket connections
-        if self.apex_client:
+        # Close connections
+        if self.nado_client:
             try:
-                # Note: disconnect() is async, but shutdown() is sync
-                # We'll let the cleanup happen naturally
-                self.logger.info("🔌 Apex WebSocket will be disconnected")
+                self.logger.info("🔌 Nado client will be disconnected")
             except Exception as e:
-                self.logger.error(f"Error disconnecting Apex WebSocket: {e}")
+                self.logger.error(f"Error disconnecting Nado client: {e}")
 
         # Cancel Lighter WebSocket task
         if self.lighter_ws_task and not self.lighter_ws_task.done():
@@ -196,8 +196,6 @@ class HedgeBot:
                 quantity
             ])
 
-        self.logger.info(f"📊 Trade logged to CSV: {exchange} {side} {quantity} @ {price}")
-
     def handle_lighter_order_result(self, order_data):
         """Handle Lighter order result from WebSocket."""
         try:
@@ -211,7 +209,7 @@ class HedgeBot:
                 order_data["side"] = "LONG"
                 order_type = "CLOSE"
                 self.lighter_position += Decimal(order_data["filled_base_amount"])
-
+            
             client_order_index = order_data["client_order_id"]
 
             self.logger.info(f"[{client_order_index}] [{order_type}] [Lighter] [FILLED]: "
@@ -522,12 +520,12 @@ class HedgeBot:
             self.logger.info("✅ Lighter client initialized successfully")
         return self.lighter_client
 
-    def initialize_apex_client(self):
-        """Initialize the Apex client."""
-        if not all([self.apex_api_key, self.apex_api_key_passphrase, self.apex_api_key_secret, self.apex_omni_key_seed]):
-            raise ValueError("APEX_API_KEY, APEX_API_KEY_PASSPHRASE, APEX_API_KEY_SECRET, and APEX_OMNI_KEY_SEED must be set in environment variables")
+    def initialize_nado_client(self):
+        """Initialize the Nado client."""
+        if not self.nado_private_key:
+            raise ValueError("NADO_PRIVATE_KEY must be set in environment variables")
 
-        # Create config for Apex client
+        # Create config for Nado client
         config_dict = {
             'ticker': self.ticker,
             'contract_id': '',  # Will be set when we get contract info
@@ -536,14 +534,14 @@ class HedgeBot:
             'close_order_side': 'sell'  # Default, will be updated based on strategy
         }
 
-        # Wrap in Config class for Apex client
+        # Wrap in Config class for Nado client
         config = Config(config_dict)
 
-        # Initialize Apex client
-        self.apex_client = ApexClient(config)
+        # Initialize Nado client
+        self.nado_client = NadoClient(config)
 
-        self.logger.info("✅ Apex client initialized successfully")
-        return self.apex_client
+        self.logger.info("✅ Nado client initialized successfully")
+        return self.nado_client
 
     def get_lighter_market_config(self) -> Tuple[int, int, int, Decimal]:
         """Get Lighter market configuration."""
@@ -570,47 +568,51 @@ class HedgeBot:
                            price_multiplier,
                            Decimal("1") / (Decimal("10") ** market["supported_price_decimals"])
                            )
-
             raise Exception(f"Ticker {self.ticker} not found")
 
         except Exception as e:
             self.logger.error(f"⚠️ Error getting market config: {e}")
             raise
 
-    async def get_apex_contract_info(self) -> Tuple[str, Decimal]:
-        """Get Apex contract ID and tick size."""
-        if not self.apex_client:
-            raise Exception("Apex client not initialized")
+    async def get_nado_contract_info(self) -> Tuple[str, Decimal]:
+        """Get Nado contract ID and tick size."""
+        if not self.nado_client:
+            raise Exception("Nado client not initialized")
 
-        contract_id, tick_size = await self.apex_client.get_contract_attributes()
+        contract_id, tick_size = await self.nado_client.get_contract_attributes()
 
-        if self.order_quantity < self.apex_client.config.quantity:
+        if self.order_quantity < self.nado_client.config.quantity:
             raise ValueError(
-                f"Order quantity is less than min quantity: {self.order_quantity} < {self.apex_client.config.quantity}")
+                f"Order quantity is less than min quantity: {self.order_quantity} < {self.nado_client.config.quantity}")
 
         return contract_id, tick_size
 
-    async def fetch_apex_bbo_prices(self) -> Tuple[Decimal, Decimal]:
-        """Fetch best bid/ask prices from Apex using REST API."""
-        if not self.apex_client:
-            raise Exception("Apex client not initialized")
+    async def get_nado_position(self) -> Decimal:
+        """Get Nado position."""
+        if not self.nado_client:
+            raise Exception("Nado client not initialized")
 
-        best_bid, best_ask = await self.apex_client.fetch_bbo_prices(self.apex_contract_id)
+        return await self.nado_client.get_account_positions()
+
+    async def fetch_nado_bbo_prices(self) -> Tuple[Decimal, Decimal]:
+        """Fetch best bid/ask prices from Nado using REST API."""
+        if not self.nado_client:
+            raise Exception("Nado client not initialized")
+
+        best_bid, best_ask = await self.nado_client.fetch_bbo_prices(self.nado_client.symbol + '_USDT0')
+
         return best_bid, best_ask
 
     def round_to_tick(self, price: Decimal) -> Decimal:
         """Round price to tick size."""
-        if self.apex_tick_size is None:
+        if self.nado_tick_size is None:
             return price
-        return (price / self.apex_tick_size).quantize(Decimal('1')) * self.apex_tick_size
+        return (price / self.nado_tick_size).quantize(Decimal('1')) * self.nado_tick_size
 
     async def place_bbo_order(self, side: str, quantity: Decimal):
-        # Get best bid/ask prices
-        best_bid, best_ask = await self.fetch_apex_bbo_prices()
-
-        # Place the order using Apex client
-        order_result = await self.apex_client.place_open_order(
-            contract_id=self.apex_contract_id,
+        # Place the order using Nado client
+        order_result = await self.nado_client.place_open_order(
+            contract_id=self.nado_contract_id,
             quantity=quantity,
             direction=side.lower()
         )
@@ -620,98 +622,54 @@ class HedgeBot:
         else:
             raise Exception(f"Failed to place order: {order_result.error_message}")
 
-    async def place_apex_post_only_order(self, side: str, quantity: Decimal):
-        """Place a post-only order on Apex."""
-        if not self.apex_client:
-            raise Exception("Apex client not initialized")
+    async def place_nado_post_only_order(self, side: str, quantity: Decimal) -> Decimal:
+        """Place a post-only order on Nado."""
+        if not self.nado_client:
+            raise Exception("Nado client not initialized")
 
-        self.apex_order_status = None
-        self.logger.info(f"[OPEN] [Apex] [{side}] Placing Apex POST-ONLY order")
+        self.nado_order_status = None
+        self.logger.info(f"[Nado] [{side}] Placing Nado POST-ONLY order")
         order_id = await self.place_bbo_order(side, quantity)
 
         start_time = time.time()
         while not self.stop_flag:
-            if self.apex_order_status == 'CANCELED':
-                self.apex_order_status = 'NEW'
-                order_id = await self.place_bbo_order(side, quantity)
-                start_time = time.time()
-                await asyncio.sleep(0.5)
-            elif self.apex_order_status in ['NEW', 'OPEN', 'PENDING', 'CANCELING', 'PARTIALLY_FILLED']:
-                await asyncio.sleep(0.5)
-                if time.time() - start_time > 10:
+            # Poll for order status
+            order_info = await self.nado_client.get_order_info(order_id)
+
+            status = order_info.status
+            price = order_info.price
+
+            if status in ['FILLED', 'CANCELLED']:
+                self.nado_order_status = status
+                return order_info.filled_size, order_info.price
+            elif time.time() - start_time > self.fill_timeout:
+                best_bid, best_ask = await self.nado_client.fetch_bbo_prices(self.nado_client.symbol + '_USDT0')
+                if side == 'buy':
+                    current_price = best_ask - self.nado_tick_size
+                else:
+                    current_price = best_bid + self.nado_tick_size
+
+                if price != current_price:
+                    self.logger.info(f"[Nado] [{side}] [CANCELING] Price changed, canceling order")
                     try:
-                        # Cancel the order using Apex client
-                        cancel_result = await self.apex_client.cancel_order(order_id)
+                        # Cancel the order using Nado client
+                        cancel_result = await self.nado_client.cancel_order(order_id)
                         if not cancel_result.success:
-                            self.logger.error(f"❌ Error canceling Apex order: {cancel_result.error_message}")
+                            self.logger.error(f"❌ Error canceling Nado order: {cancel_result.error_message}")
+                            return Decimal(0), Decimal(0)
+                        else:
+                            self.logger.info(f"Failed to cancel Nado order")
+                            return cancel_result.filled_size, cancel_result.price
                     except Exception as e:
-                        self.logger.error(f"❌ Error canceling Apex order: {e}")
-            elif self.apex_order_status == 'FILLED':
-                break
-            else:
-                if self.apex_order_status is not None:
-                    self.logger.error(f"❌ Unknown Apex order status: {self.apex_order_status}")
-                    break
+                        self.logger.error(f"❌ Error canceling Nado order: {e}")
+                        return Decimal(0), Decimal(0)
                 else:
                     await asyncio.sleep(0.5)
+            else:
+                await asyncio.sleep(0.5)
 
-    def handle_apex_order_book_update(self, message):
-        """Handle Apex order book updates from WebSocket."""
-        try:
-            if isinstance(message, str):
-                message = json.loads(message)
-
-            self.logger.debug(f"Received Apex depth message: {message}")
-
-            # Check if this is a depth update message
-            if message.get("stream") and "depth" in message.get("stream", ""):
-                data = message.get("data", {})
-
-                if data:
-                    # Update bids - format is [["price", "size"], ...]
-                    # Apex API uses 'b' for bids
-                    bids = data.get('b', [])
-                    for bid in bids:
-                        price = Decimal(bid[0])
-                        size = Decimal(bid[1])
-                        if size > 0:
-                            self.apex_order_book['bids'][price] = size
-                        else:
-                            # Remove zero size orders
-                            self.apex_order_book['bids'].pop(price, None)
-
-                    # Update asks - format is [["price", "size"], ...]
-                    # Apex API uses 'a' for asks
-                    asks = data.get('a', [])
-                    for ask in asks:
-                        price = Decimal(ask[0])
-                        size = Decimal(ask[1])
-                        if size > 0:
-                            self.apex_order_book['asks'][price] = size
-                        else:
-                            # Remove zero size orders
-                            self.apex_order_book['asks'].pop(price, None)
-
-                    # Update best bid and ask
-                    if self.apex_order_book['bids']:
-                        self.apex_best_bid = max(self.apex_order_book['bids'].keys())
-                    if self.apex_order_book['asks']:
-                        self.apex_best_ask = min(self.apex_order_book['asks'].keys())
-
-                    if not self.apex_order_book_ready:
-                        self.apex_order_book_ready = True
-                        self.logger.info(f"📊 Apex order book ready - Best bid: {self.apex_best_bid}, "
-                                         f"Best ask: {self.apex_best_ask}")
-                    else:
-                        self.logger.debug(f"📊 Order book updated - Best bid: {self.apex_best_bid}, "
-                                          f"Best ask: {self.apex_best_ask}")
-
-        except Exception as e:
-            self.logger.error(f"Error handling Apex order book update: {e}")
-            self.logger.error(f"Message content: {message}")
-
-    def handle_apex_order_update(self, order_data):
-        """Handle Apex order updates from WebSocket."""
+    def handle_nado_order_update(self, order_data):
+        """Handle Nado order updates."""
         side = order_data.get('side', '').lower()
         filled_size = Decimal(order_data.get('filled_size', '0'))
         price = Decimal(order_data.get('price', '0'))
@@ -734,7 +692,7 @@ class HedgeBot:
 
         self.waiting_for_lighter_fill = True
 
-    async def place_lighter_market_order(self, lighter_side: str, quantity: Decimal, price: Decimal):
+    async def place_lighter_market_order(self, lighter_side: str, quantity: Decimal):
         if not self.lighter_client:
             await self.initialize_lighter_client()
 
@@ -749,6 +707,7 @@ class HedgeBot:
             order_type = "OPEN"
             is_ask = True
             price = best_bid[0] * Decimal('0.998')
+
 
         # Reset order state
         self.lighter_order_filled = False
@@ -779,7 +738,7 @@ class HedgeBot:
                 tx_info=tx_info
             )
 
-            self.logger.info(f"[{client_order_index}] [{order_type}] [Lighter] [OPEN]: {quantity}")
+            self.logger.info(f"[Lighter] [OPEN]: {quantity}")
 
             await self.monitor_lighter_order(client_order_index)
 
@@ -842,78 +801,44 @@ class HedgeBot:
             import traceback
             self.logger.error(f"❌ Full traceback: {traceback.format_exc()}")
 
-    async def setup_apex_websocket(self):
-        """Setup Apex websocket for order updates and order book data."""
-        if not self.apex_client:
-            raise Exception("Apex client not initialized")
+    def get_lighter_position(self):
+        url = "https://mainnet.zklighter.elliot.ai/api/v1/account"
+        headers = {"accept": "application/json"}
 
-        def order_update_handler(order_data):
-            """Handle order updates from Apex WebSocket."""
-            if order_data.get('contract_id') != self.apex_contract_id:
-                return
-            try:
-                order_id = order_data.get('order_id')
-                status = order_data.get('status')
-                side = order_data.get('side', '').lower()
-                filled_size = Decimal(order_data.get('filled_size', '0'))
-                size = Decimal(order_data.get('size', '0'))
-                price = order_data.get('price', '0')
-
-                if side == 'buy':
-                    order_type = "OPEN"
-                else:
-                    order_type = "CLOSE"
-
-                if status == 'CANCELED' and filled_size > 0:
-                    status = 'FILLED'
-
-                # Handle the order update
-                if status == 'FILLED' and self.apex_order_status != 'FILLED':
-                    if side == 'buy':
-                        self.apex_position += filled_size
-                    else:
-                        self.apex_position -= filled_size
-                    self.logger.info(f"[{order_id}] [{order_type}] [Apex] [{status}]: {filled_size} @ {price}")
-                    self.apex_order_status = status
-
-                    # Log Apex trade to CSV
-                    self.log_trade_to_csv(
-                        exchange='Apex',
-                        side=side,
-                        price=str(price),
-                        quantity=str(filled_size)
-                    )
-
-                    self.handle_apex_order_update({
-                        'order_id': order_id,
-                        'side': side,
-                        'status': status,
-                        'size': size,
-                        'price': price,
-                        'contract_id': self.apex_contract_id,
-                        'filled_size': filled_size
-                    })
-                elif self.apex_order_status != 'FILLED':
-                    if status == 'OPEN':
-                        self.logger.info(f"[{order_id}] [{order_type}] [Apex] [{status}]: {size} @ {price}")
-                    else:
-                        self.logger.info(f"[{order_id}] [{order_type}] [Apex] [{status}]: {filled_size} @ {price}")
-                    self.apex_order_status = status
-
-            except Exception as e:
-                self.logger.error(f"Error handling Apex order update: {e}")
-
+        current_position = None
+        parameters = {"by": "index", "value": self.account_index}
         try:
-            # Setup order update handler
-            self.apex_client.setup_order_update_handler(order_update_handler)
-            self.logger.info("✅ Apex WebSocket order update handler set up")
+            response = requests.get(url, headers=headers, params=parameters, timeout=10)
+            response.raise_for_status()  # Raise an exception for bad status codes
 
-            # Connect to Apex WebSocket
-            await self.apex_client.connect()
-            self.logger.info("✅ Apex WebSocket connection established")
+            # Check if response has content
+            if not response.text.strip():
+                print("⚠️ Empty response from Lighter API for position check")
+                return self.lighter_position
 
+            data = response.json()
+
+            if 'accounts' not in data or not data['accounts']:
+                print(f"⚠️ Unexpected response format from Lighter API: {data}")
+                return self.lighter_position
+
+            positions = data['accounts'][0].get('positions', [])
+            for position in positions:
+                if position.get('symbol') == self.ticker:
+                    current_position = Decimal(position['position']) * position['sign']
+                    break
+            if current_position is None:
+                current_position = 0
+
+        except requests.exceptions.RequestException as e:
+            print(f"⚠️ Network error getting position: {e}")
+        except json.JSONDecodeError as e:
+            print(f"⚠️ JSON parsing error in position response: {e}")
+            print(f"Response text: {response.text[:200]}...")  # Show first 200 chars
         except Exception as e:
-            self.logger.error(f"Could not setup Apex WebSocket handlers: {e}")
+            print(f"⚠️ Unexpected error getting position: {e}")
+
+        return current_position
 
     async def trading_loop(self):
         """Main trading loop implementing the new strategy."""
@@ -922,26 +847,36 @@ class HedgeBot:
         # Initialize clients
         try:
             self.initialize_lighter_client()
-            self.initialize_apex_client()
+            self.initialize_nado_client()
 
             # Get contract info
-            self.apex_contract_id, self.apex_tick_size = await self.get_apex_contract_info()
+            self.nado_contract_id, self.nado_tick_size = await self.get_nado_contract_info()
             self.lighter_market_index, self.base_amount_multiplier, self.price_multiplier, self.tick_size = self.get_lighter_market_config()
 
-            self.logger.info(f"Contract info loaded - Apex: {self.apex_contract_id}, "
+            self.logger.info(f"Contract info loaded - Nado: {self.nado_contract_id}, "
                              f"Lighter: {self.lighter_market_index}")
 
         except Exception as e:
             self.logger.error(f"❌ Failed to initialize: {e}")
             return
 
-        # Setup Apex websocket
+        # Connect to Nado
         try:
-            await self.setup_apex_websocket()
-            self.logger.info("✅ Apex WebSocket connection established")
+            await self.nado_client.connect()
+            self.logger.info("✅ Nado client connected")
+
+            # Fetch initial BBO prices
+            best_bid, best_ask = await self.fetch_nado_bbo_prices()
+            if best_bid > 0 and best_ask > 0:
+                self.nado_best_bid = best_bid
+                self.nado_best_ask = best_ask
+                self.nado_order_book_ready = True
+                self.logger.info(f"✅ Nado order book ready - Best bid: {best_bid}, Best ask: {best_ask}")
+            else:
+                self.logger.warning("⚠️ Failed to get initial Nado order book data")
 
         except Exception as e:
-            self.logger.error(f"❌ Failed to setup Apex websocket: {e}")
+            self.logger.error(f"❌ Failed to connect to Nado: {e}")
             return
 
         # Setup Lighter websocket
@@ -971,116 +906,102 @@ class HedgeBot:
         await asyncio.sleep(5)
 
         iterations = 0
-        self.apex_position = Decimal('0')
-        self.lighter_position = Decimal('0')
+        self.lighter_position = self.get_lighter_position()
+        self.nado_position = await self.get_nado_position()
         while iterations < self.iterations and not self.stop_flag:
             iterations += 1
             self.logger.info("-----------------------------------------------")
             self.logger.info(f"🔄 Trading loop iteration {iterations}")
             self.logger.info("-----------------------------------------------")
 
-            self.logger.info(f"[STEP 1] Apex position: {self.apex_position} | Lighter position: {self.lighter_position}")
+            while self.nado_position < self.max_position and not self.stop_flag:
+                self.lighter_position = self.get_lighter_position()
+                self.nado_position = await self.get_nado_position()
+                self.logger.info(f"Buying up to {self.max_position} | Nado position: {self.nado_position} | Lighter position: {self.lighter_position}")
+                if abs(self.nado_position + self.lighter_position) > self.order_quantity*2:
+                    self.logger.error(f"❌ Position diff is too large: {self.nado_position + self.lighter_position}")
+                    sys.exit(1)
 
-            if abs(self.apex_position + self.lighter_position) > self.order_quantity*2:
-                self.logger.error(f"❌ Position diff is too large: {self.apex_position + self.lighter_position}")
-                break
+                self.order_execution_complete = False
+                self.waiting_for_lighter_fill = False
+                try:
+                    # Determine side based on some logic (for now, alternate)
+                    side = 'buy'
+                    filled_size, filled_price = await self.place_nado_post_only_order(side, self.order_quantity)
+                    if filled_size == 0:
+                        self.logger.info(f"[Nado] [{side}] [CANCELLED]")
+                        continue
+                except Exception as e:
+                    self.logger.error(f"⚠️ Error placing nado post only order: {e}")
+                    self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
+                    continue
 
-            self.order_execution_complete = False
-            self.waiting_for_lighter_fill = False
-            try:
-                # Determine side based on some logic (for now, alternate)
-                side = 'buy'
-                await self.place_apex_post_only_order(side, self.order_quantity)
-            except Exception as e:
-                self.logger.error(f"⚠️ Error in trading loop: {e}")
-                self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
-                break
+                self.logger.info(f"[Nado] [{side}] [FILLED]: {filled_size} @ {filled_price}")
+                # Log Nado trade to CSV
+                self.log_trade_to_csv(
+                    exchange='Nado',
+                    side='buy',
+                    price=str(filled_price),
+                    quantity=str(filled_size)
+                )
 
-            start_time = time.time()
-            while not self.order_execution_complete and not self.stop_flag:
-                # Check if Apex order filled and we need to place Lighter order
-                if self.waiting_for_lighter_fill:
-                    await self.place_lighter_market_order(
-                        self.current_lighter_side,
-                        self.current_lighter_quantity,
-                        self.current_lighter_price
-                    )
-                    break
+                self.nado_position += filled_size
 
-                await asyncio.sleep(0.01)
-                if time.time() - start_time > 180:
-                    self.logger.error("❌ Timeout waiting for trade completion")
-                    break
+                await self.place_lighter_market_order(
+                    'sell',
+                    abs(filled_size)
+                )
 
-            if self.stop_flag:
-                break
-
-            # Sleep after step 1
             if self.sleep_time > 0:
-                self.logger.info(f"💤 Sleeping {self.sleep_time} seconds after STEP 1...")
+                self.logger.info(f"💤 Sleeping {self.sleep_time} seconds ...")
                 await asyncio.sleep(self.sleep_time)
 
-            # Close position
-            self.logger.info(f"[STEP 2] Apex position: {self.apex_position} | Lighter position: {self.lighter_position}")
-            self.order_execution_complete = False
-            self.waiting_for_lighter_fill = False
-            try:
-                # Determine side based on some logic (for now, alternate)
-                side = 'sell'
-                await self.place_apex_post_only_order(side, self.order_quantity)
-            except Exception as e:
-                self.logger.error(f"⚠️ Error in trading loop: {e}")
-                self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
-                break
+            exit_after_next_trade = False
+            while self.nado_position > -1 * self.max_position and not self.stop_flag:
+                self.lighter_position = self.get_lighter_position()
+                self.nado_position = await self.get_nado_position()
+                self.logger.info(f"Selling up to -{self.max_position} | Nado position: {self.nado_position} | Lighter position: {self.lighter_position}")
+                if abs(self.nado_position + self.lighter_position) > self.order_quantity*2:
+                    self.logger.error(f"❌ Position diff is too large: {self.nado_position + self.lighter_position}")
+                    sys.exit(1)
 
-            while not self.order_execution_complete and not self.stop_flag:
-                # Check if Apex order filled and we need to place Lighter order
-                if self.waiting_for_lighter_fill:
-                    await self.place_lighter_market_order(
-                        self.current_lighter_side,
-                        self.current_lighter_quantity,
-                        self.current_lighter_price
-                    )
-                    break
+                if iterations == self.iterations:
+                    if self.nado_position>0 and self.nado_position <= self.order_quantity:
+                        exit_after_next_trade = True
 
-                await asyncio.sleep(0.01)
-                if time.time() - start_time > 180:
-                    self.logger.error("❌ Timeout waiting for trade completion")
-                    break
+                try:
+                    # Determine side based on some logic (for now, alternate)
+                    side = 'sell'
+                    if exit_after_next_trade:
+                        filled_size, filled_price = await self.place_nado_post_only_order(side, abs(self.nado_position))
+                    else:
+                        filled_size, filled_price = await self.place_nado_post_only_order(side, self.order_quantity)
+                    if filled_size == 0:
+                        self.logger.info(f"[Nado] [{side}] [CANCELLED]")
+                        continue
+                except Exception as e:
+                    self.logger.error(f"⚠️ Error placing nado post only order: {e}")
+                    self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
+                    continue
 
-            # Close remaining position
-            self.logger.info(f"[STEP 3] Apex position: {self.apex_position} | Lighter position: {self.lighter_position}")
-            self.order_execution_complete = False
-            self.waiting_for_lighter_fill = False
-            if self.apex_position == 0:
-                continue
-            elif self.apex_position > 0:
-                side = 'sell'
-            else:
-                side = 'buy'
+                self.logger.info(f"[Nado] [{side}] [FILLED]: {filled_size} @ {filled_price}")
+                # Log Nado trade to CSV
+                self.log_trade_to_csv(
+                    exchange='Nado',
+                    side='sell',
+                    price=str(filled_price),
+                    quantity=str(filled_size)
+                )
 
-            try:
-                # Determine side based on some logic (for now, alternate)
-                await self.place_apex_post_only_order(side, abs(self.apex_position))
-            except Exception as e:
-                self.logger.error(f"⚠️ Error in trading loop: {e}")
-                self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
-                break
+                self.nado_position -= abs(filled_size)
 
-            # Wait for order to be filled via WebSocket
-            while not self.order_execution_complete and not self.stop_flag:
-                # Check if Apex order filled and we need to place Lighter order
-                if self.waiting_for_lighter_fill:
-                    await self.place_lighter_market_order(
-                        self.current_lighter_side,
-                        self.current_lighter_quantity,
-                        self.current_lighter_price
-                    )
-                    break
+                await self.place_lighter_market_order(
+                    'buy',
+                    abs(filled_size)
+                )
 
-                await asyncio.sleep(0.01)
-                if time.time() - start_time > 180:
-                    self.logger.error("❌ Timeout waiting for trade completion")
+                if exit_after_next_trade:
+                    self.logger.info("Position back to zero. Done! Exiting...")
                     break
 
     async def run(self):
@@ -1094,22 +1015,3 @@ class HedgeBot:
         finally:
             self.logger.info("🔄 Cleaning up...")
             self.shutdown()
-
-
-def parse_arguments():
-    """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description='Trading bot for Apex and Lighter')
-    parser.add_argument('--exchange', type=str,
-                        help='Exchange')
-    parser.add_argument('--ticker', type=str, default='BTC',
-                        help='Ticker symbol (default: BTC)')
-    parser.add_argument('--size', type=str,
-                        help='Number of tokens to buy/sell per order')
-    parser.add_argument('--iter', type=int,
-                        help='Number of iterations to run')
-    parser.add_argument('--fill-timeout', type=int, default=5,
-                        help='Timeout in seconds for maker order fills (default: 5)')
-    parser.add_argument('--sleep', type=int, default=0,
-                        help='Sleep time in seconds after each step (default: 0)')
-
-    return parser.parse_args()

@@ -280,7 +280,7 @@ The new Hedge Mode (`hedge_mode.py`) is an trading strategy that reduces risk by
 
 ```bash
 # Run BTC hedge mode with Backpack
-python hedge_mode.py --exchange backpack --ticker BTC --size 0.05 --iter 20
+python hedge_mode.py --exchange backpack --ticker BTC --size 0.05 --iter 20 --max-position 1
 
 # Run ETH hedge mode with Extended
 python hedge_mode.py --exchange extended --ticker ETH --size 0.1 --iter 20
@@ -303,6 +303,7 @@ python hedge_mode.py --exchange edgex --ticker BTC --size 0.001 --iter 20
 - `--iter`: Number of trading cycles
 - `--fill-timeout`: Maker order fill timeout in seconds (default: 5)
 - `--sleep`: Sleep time in seconds after each step (default: 0)
+- `--max-position`: When this parameter is set, the hedging mode will gradually build a position up to the specified maximum size while performing the hedge. The unit is in the base asset. For example, when running BTC, setting it to 0.1 means it will gradually build a position up to 0.1 BTC while hedging.
 
 ## Configuration
 

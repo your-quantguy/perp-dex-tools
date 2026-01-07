@@ -48,6 +48,11 @@ APEX_API_KEY_PASSPHRASE=your_apex_api_key_passphrase
 APEX_API_KEY_SECRET=your_apex_api_key_secret
 APEX_OMNI_KEY_SEED=your_apex_omni_key_seed
 
+# Nado Configuration
+# Get your private key from Nado account settings
+NADO_PRIVATE_KEY=your_nado_private_key_here
+NADO_MODE=MAINNET  # or DEVNET
+
 # Notification (optional)
 # guide: https://www.feishu.cn/hc/zh-CN/articles/185289387886-%E6%B6%88%E6%81%AF%E5%8A%A9%E6%89%8B-%E6%9C%BA%E5%99%A8%E4%BA%BA
 LARK_TOKEN=

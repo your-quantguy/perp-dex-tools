@@ -95,20 +95,16 @@ class LighterCustomWebSocketManager:
 
         # Check if the new offset is sequential (should be +1)
         expected_offset = self.order_book_offset + 1
-        if new_offset == expected_offset:
+        if new_offset >= expected_offset:
             # Sequential update, update our offset
             self.order_book_offset = new_offset
             self.order_book_sequence_gap = False
             return True
-        elif new_offset > expected_offset:
+        elif new_offset < expected_offset:
             # Gap detected - we missed some updates
             self._log(f"Order book sequence gap detected! Expected offset {expected_offset}, got {new_offset}", "WARNING")
             self.order_book_sequence_gap = True
             return False
-        else:
-            # Out of order or duplicate update
-            self._log(f"Out of order update received! Expected offset {expected_offset}, got {new_offset}", "WARNING")
-            return True  # Don't reconnect for out-of-order updates, just ignore them
 
     def handle_order_book_cutoff(self, data: Dict[str, Any]) -> bool:
         """Handle cases where order book updates might be cutoff or incomplete."""

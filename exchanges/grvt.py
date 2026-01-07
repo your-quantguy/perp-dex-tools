@@ -156,6 +156,9 @@ class GrvtClient(BaseExchangeClient):
                         price = leg.get('limit_price', '0')
                         filled_size = order_state.get('traded_size')[0] if order_state.get('traded_size') else '0'
 
+                        if Decimal(price) == 0:
+                            price = data.get('state', {}).get('avg_fill_price', ['0'])[0]
+
                         if order_id and status:
                             # Determine order type based on side
                             if side == self.config.close_order_side:
@@ -285,6 +288,19 @@ class GrvtClient(BaseExchangeClient):
         else:
             return order_info
 
+    async def place_market_order(self, contract_id: str, quantity: Decimal, side: str) -> OrderResult:
+        """Place a market order with GRVT using official SDK."""
+
+        # Place the order using GRVT SDK
+        order_result = self.rest_client.create_order(
+            symbol=contract_id,
+            order_type='market',
+            side=side,
+            amount=quantity
+        )
+        if not order_result:
+            raise Exception(f"[OPEN] Error placing order")
+
     async def get_order_price(self, direction: str) -> Decimal:
         """Get the price of an order with GRVT using official SDK."""
         best_bid, best_ask = await self.fetch_bbo_prices(self.config.contract_id)
@@ -301,7 +317,7 @@ class GrvtClient(BaseExchangeClient):
     async def place_open_order(self, contract_id: str, quantity: Decimal, direction: str) -> OrderResult:
         """Place an open order with GRVT."""
         attempt = 0
-        while True:
+        while attempt < 15:
             attempt += 1
             if attempt % 5 == 0:
                 self.logger.log(f"[OPEN] Attempt {attempt} to place order", "INFO")
@@ -506,7 +522,7 @@ class GrvtClient(BaseExchangeClient):
 
         for position in positions:
             if position.get('instrument') == self.config.contract_id:
-                return abs(Decimal(position.get('size', 0)))
+                return Decimal(position.get('size', 0))
 
         return Decimal(0)
 

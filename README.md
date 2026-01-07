@@ -306,7 +306,7 @@ python runbot.py --exchange extended --ticker ETH --quantity 0.1 --take-profit 0
 
 ```bash
 # 运行 BTC 对冲模式（Backpack）
-python hedge_mode.py --exchange backpack --ticker BTC --size 0.05 --iter 20
+python hedge_mode.py --exchange backpack --ticker BTC --size 0.05 --iter 20 --max-position 1
 
 # 运行 ETH 对冲模式（Extended）
 python hedge_mode.py --exchange extended --ticker ETH --size 0.1 --iter 20
@@ -329,6 +329,7 @@ python hedge_mode.py --exchange edgex --ticker BTC --size 0.001 --iter 20
 - `--iter`: 交易循环次数
 - `--fill-timeout`: maker 订单填充超时时间（秒，默认 5）
 - `--sleep`: 每一笔交易之后的暂停时间，增加持仓时间（秒，默认 0）
+- `--max-position`: 当设置了这个参数后，对冲模式会在对冲的同时逐渐建仓到设置的最大仓位，单位是币本位，比如在跑btc时设置0.1，就是指逐渐建仓到0.1btc，并逐渐建仓。达到这个最大仓位后，会逐渐建仓，以此循环。
 
 ## 配置
 
@@ -391,6 +392,11 @@ python hedge_mode.py --exchange edgex --ticker BTC --size 0.001 --iter 20
 - `APEX_API_KEY_SECRET`: 您的 Apex API 密钥私钥
 - `APEX_OMNI_KEY_SEED`: 您的 Apex Omni 密钥种子
 
+#### Nado 配置
+
+- `NADO_PRIVATE_KEY`: 您的钱包私钥
+- `NADO_MODE`: 网络模式（MAINNET 或 DEVNET，默认：MAINNET）
+
 **获取 LIGHTER_ACCOUNT_INDEX 的方法**：
 
 1. 在下面的网址最后加上你的钱包地址：
@@ -405,7 +411,7 @@ python hedge_mode.py --exchange edgex --ticker BTC --size 0.001 --iter 20
 
 ### 命令行参数
 
-- `--exchange`: 使用的交易所：'edgex'、'backpack'、'paradex'、'aster'、'lighter'、'grvt' 或 'extended'（默认：edgex）
+- `--exchange`: 使用的交易所：'edgex'、'backpack'、'paradex'、'aster'、'lighter'、'grvt'、'extended' 或 'nado'（默认：edgex）
 - `--ticker`: 标的资产符号（例如：ETH、BTC、SOL）。合约 ID 自动解析。
 - `--quantity`: 订单数量（默认：0.1）
 - `--take-profit`: 止盈百分比（例如 0.02 表示 0.02%）

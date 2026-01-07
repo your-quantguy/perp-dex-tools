@@ -312,7 +312,7 @@ class ApexClient(BaseExchangeClient):
                     side=side.upper(),
                     type='LIMIT',
                     timestampSeconds=time.time(),
-                    timeInForce='GOOD_TIL_CANCEL',
+                    timeInForce='POST_ONLY',
                 )
 
                 if not order_result or 'data' not in order_result:
@@ -400,7 +400,7 @@ class ApexClient(BaseExchangeClient):
                     side=side.upper(),
                     type='LIMIT',
                     timestampSeconds=time.time(),
-                    timeInForce='GOOD_TIL_CANCEL',
+                    timeInForce='POST_ONLY',
                 )
 
                 if not order_result or 'data' not in order_result:

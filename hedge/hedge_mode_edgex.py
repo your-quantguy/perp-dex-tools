@@ -24,12 +24,16 @@ dotenv.load_dotenv()
 
 class HedgeBot:
     """Trading bot that places post-only orders on edgeX and hedges with market orders on Lighter."""
-
-    def __init__(self, ticker: str, order_quantity: Decimal, fill_timeout: int = 5, iterations: int = 20, sleep_time: int = 0):
+    
+    def __init__(self, ticker: str, order_quantity: Decimal, fill_timeout: int = 5, iterations: int = 20, sleep_time: int = 0, max_position: Decimal = Decimal('0')):
         self.ticker = ticker
         self.order_quantity = order_quantity
         self.fill_timeout = fill_timeout
         self.iterations = iterations
+        if max_position == Decimal('0'):
+            self.max_position = order_quantity
+        else:
+            self.max_position = max_position
         self.sleep_time = sleep_time
         self.edgex_position = Decimal('0')
         self.lighter_position = Decimal('0')
@@ -40,17 +44,17 @@ class HedgeBot:
         self.log_filename = f"logs/{ticker}_hedge_mode_log.txt"
         self.csv_filename = f"logs/{ticker}_hedge_mode_trades.csv"
         self.original_stdout = sys.stdout
-
+        
         # Initialize CSV file with headers if it doesn't exist
         self._initialize_csv_file()
-
+        
         # Setup logger
         self.logger = logging.getLogger(f"hedge_bot_{ticker}")
         self.logger.setLevel(logging.INFO)
-
+        
         # Clear any existing handlers to avoid duplicates
         self.logger.handlers.clear()
-
+        
         # Disable verbose logging from external libraries
         logging.getLogger('urllib3').setLevel(logging.WARNING)
         logging.getLogger('requests').setLevel(logging.WARNING)
@@ -234,7 +238,7 @@ class HedgeBot:
         self.logger.info("✅ edgeX client initialized successfully")
         return self.edgex_client
 
-    async def get_lighter_market_config(self) -> Tuple[int, int, int, Decimal]:
+    async def get_lighter_market_config(self) -> Tuple[int, int, int]:
         """Get Lighter market configuration."""
         url = f"{self.lighter_base_url}/api/v1/orderBooks"
         headers = {"accept": "application/json"}
@@ -253,12 +257,10 @@ class HedgeBot:
 
             for market in data["order_books"]:
                 if market["symbol"] == self.ticker:
-                    price_multiplier = pow(10, market["supported_price_decimals"])
                     return (market["market_id"], 
                            pow(10, market["supported_size_decimals"]), 
-                           price_multiplier,
-                           Decimal("1") / (Decimal("10") ** market["supported_price_decimals"])
-                           )
+                           pow(10, market["supported_price_decimals"]))
+
             raise Exception(f"Ticker {self.ticker} not found")
 
         except Exception as e:
@@ -389,21 +391,29 @@ class HedgeBot:
         order_id = await self.place_bbo_order(side, quantity)
 
         start_time = time.time()
+        cancel_count = 0
         while not self.stop_flag:
             if self.edgex_order_status == 'CANCELED':
+                await asyncio.sleep(1.5)
                 self.edgex_order_status = 'NEW'
                 order_id = await self.place_bbo_order(side, quantity)
                 start_time = time.time()
-                await asyncio.sleep(1)
             elif self.edgex_order_status in ['NEW', 'OPEN', 'PENDING', 'CANCELING']:
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(1)
                 if time.time() - start_time > self.fill_timeout:
+                    cancel_count += 1
+                    if cancel_count > 10:
+                        self.logger.error(f"❌ Too many cancellations, Continuing...")
+                        if side == 'buy':
+                            self.edgex_position = self.edgex_position + quantity
+                        else:
+                            self.edgex_position = self.edgex_position - quantity
+                        raise Exception("Too many cancellations")
                     try:
                         cancel_params = CancelOrderParams(order_id=order_id)
                         # Cancel the order using official SDK
                         self.logger.info(f"[{order_id}] [OPEN] [edgeX] [{side}] Time out - Canceling edgeX order.")
                         cancel_result = await self.edgex_client.cancel_order(cancel_params)
-                        await asyncio.sleep(1)
                     except Exception as e:
                         self.logger.error(f"❌ Error canceling edgeX order: {e}")
             elif self.edgex_order_status == 'FILLED':
@@ -579,10 +589,7 @@ class HedgeBot:
         if best_bid is None or best_ask is None:
             raise Exception("Cannot calculate mid price - missing order book data")
         
-        if is_ask:
-            order_price = best_bid[0]+self.tick_size
-        else:
-            order_price = best_ask[0]-self.tick_size
+        order_price = (best_bid[0]+best_ask[0])/Decimal('2')
 
         return order_price
 
@@ -717,10 +724,10 @@ class HedgeBot:
                                 elif data.get("type") == "update/account_orders":
                                     # Handle account orders updates
                                     orders = data.get("orders", {}).get(str(self.lighter_market_index), [])
-                                    if len(orders) == 1:
-                                        order_data = orders[0]
-                                        if order_data.get("status") == "filled":
-                                            self.handle_lighter_order_result(order_data)
+                                    if len(orders) > 0:
+                                        for order_data in orders:
+                                            if order_data.get("status") == "filled":
+                                                self.handle_lighter_order_result(order_data)
                                 elif data.get("type") == "update/order_book" and not self.lighter_snapshot_loaded:
                                     # Ignore updates until we have the initial snapshot
                                     continue
@@ -858,15 +865,17 @@ class HedgeBot:
             self.logger.error(f"❌ Error placing Lighter order: {e}")
             return None
 
+
     async def monitor_lighter_order(self, client_order_index: int):
         """Monitor Lighter order and adjust price if needed."""
         self.logger.info(f"🔍 Starting to monitor Lighter order - Order ID: {client_order_index}")
 
         start_time = time.time()
         order_place_time = time.time()
+        original_price = self.lighter_order_price
         while not self.lighter_order_filled and not self.stop_flag:
             # Check if 1 second has passed and we haven't adjusted price yet
-            if time.time() - start_time > 1:
+            if time.time() - start_time > 1.5:
                 try:
                     # Calculate adjusted price
                     adjusted_price = self.calculate_adjusted_price(
@@ -886,13 +895,19 @@ class HedgeBot:
                     self.logger.error(f"❌ Error adjusting Lighter order price: {e}")
                     break
             
-            # Check for timeout (30 seconds total)
-            if time.time() - order_place_time > 30:
+            # Check for timeout (15 seconds total)
+            if time.time() - order_place_time > 15:
                 self.logger.error(f"❌ Timeout waiting for Lighter order fill after {time.time() - order_place_time:.1f}s")
                 self.logger.error(f"❌ Order state - Filled: {self.lighter_order_filled}")
                 
                 # Fallback: Mark as filled to continue trading
                 self.logger.warning("⚠️ Using fallback - marking order as filled to continue trading")
+                self.log_trade_to_csv(
+                    exchange='Lighter',
+                    side=self.lighter_order_side,
+                    price=str(original_price),
+                    quantity=str(self.lighter_order_size)
+                )
                 self.lighter_order_filled = True
                 self.waiting_for_lighter_fill = False
                 self.order_execution_complete = True
@@ -1029,208 +1044,346 @@ class HedgeBot:
         except Exception as e:
             self.logger.error(f"Could not setup edgeX WebSocket handlers: {e}")
 
-    async def trading_loop(self):
-        """Main trading loop implementing the new strategy."""
-        self.logger.info(f"🚀 Starting hedge bot for {self.ticker}")
+
+    def get_lighter_position(self):
+        url = "https://mainnet.zklighter.elliot.ai/api/v1/account"
+        headers = {"accept": "application/json"}
+
+        current_position = None
+        parameters = {"by": "index", "value": self.account_index}
+        try:
+            response = requests.get(url, headers=headers, params=parameters, timeout=10)
+            response.raise_for_status()  # Raise an exception for bad status codes
+
+            # Check if response has content
+            if not response.text.strip():
+                print("⚠️ Empty response from Lighter API for position check")
+                return self.lighter_position
+
+            data = response.json()
+
+            if 'accounts' not in data or not data['accounts']:
+                print(f"⚠️ Unexpected response format from Lighter API: {data}")
+                return self.lighter_position
+
+            positions = data['accounts'][0].get('positions', [])
+            for position in positions:
+                if position.get('symbol') == self.ticker:
+                    current_position = Decimal(position['position']) * position['sign']
+                    break
+            if current_position is None:
+                current_position = 0
+
+        except requests.exceptions.RequestException as e:
+            print(f"⚠️ Network error getting position: {e}")
+        except json.JSONDecodeError as e:
+            print(f"⚠️ JSON parsing error in position response: {e}")
+            print(f"Response text: {response.text[:200]}...")  # Show first 200 chars
+        except Exception as e:
+            print(f"⚠️ Unexpected error getting position: {e}")
+
+        return current_position
+
+    async def get_edgex_position(self) -> Decimal:
+        """Get account positions using official SDK."""
+        position_data_updated = False
+        while not position_data_updated:
+            try:
+                positions_data = await self.edgex_client.get_account_positions()
+                position_data_updated = True
+            except Exception as e:
+                self.logger.error(f"Error getting edgeX position: {e}")
+                await asyncio.sleep(1)
         
-        # Initialize clients
-        try:
-            await self.initialize_lighter_client()
-            self.initialize_edgex_client()
-            
-            # Get contract info
-            self.edgex_contract_id, self.edgex_tick_size = await self.get_edgex_contract_info()
-            self.lighter_market_index, self.base_amount_multiplier, self.price_multiplier, self.tick_size = await self.get_lighter_market_config()
-            
-            self.logger.info(f"Contract info loaded - edgeX: {self.edgex_contract_id}, Lighter: {self.lighter_market_index}")
-            
-        except Exception as e:
-            self.logger.error(f"❌ Failed to initialize: {e}")
-            return
+        if not positions_data or 'data' not in positions_data:
+            self.logger.log("No positions or failed to get positions", "WARNING")
+            position_amt = 0
+        else:
+            # The API returns positions under data.positionList
+            positions = positions_data.get('data', {}).get('positionList', [])
+            if positions:
+                # Find position for current contract
+                position = None
+                for p in positions:
+                    if isinstance(p, dict) and p.get('contractId') == self.edgex_contract_id:
+                        position = p
+                        break
 
-        # Setup edgeX websocket
-        try:
-            await self.setup_edgex_websocket()
-            # Connect both public (for market data) and private (for order updates) websockets
-            self.edgex_ws_manager.connect_public()
-            self.edgex_ws_manager.connect_private()
-            self.logger.info("✅ edgeX WebSocket connections established")
-            
-            # Subscribe to depth channel after connection is established
-            public_client = self.edgex_ws_manager.get_public_client()
-            public_client.subscribe(f"depth.{self.edgex_contract_id}.15")
-            self.logger.info(f"✅ Subscribed to depth channel: depth.{self.edgex_contract_id}.15")
-            
-            # Wait for initial order book data with timeout
-            self.logger.info("⏳ Waiting for initial order book data...")
-            timeout = 10  # seconds
-            start_time = time.time()
-            while not self.edgex_order_book_ready and not self.stop_flag:
-                if time.time() - start_time > timeout:
-                    self.logger.warning(f"⚠️ Timeout waiting for WebSocket order book data after {timeout}s")
-                    break
-                await asyncio.sleep(0.5)
-            
-            if self.edgex_order_book_ready:
-                self.logger.info("✅ WebSocket order book data received")
-            else:
-                self.logger.warning("⚠️ WebSocket order book not ready, will use REST API fallback")
-            
-        except Exception as e:
-            self.logger.error(f"❌ Failed to setup edgeX websocket: {e}")
-            return
-
-        # Setup Lighter websocket
-        try:
-            self.lighter_ws_task = asyncio.create_task(self.handle_lighter_ws())
-            self.logger.info("✅ Lighter WebSocket task started")
-            
-            # Wait for initial Lighter order book data with timeout
-            self.logger.info("⏳ Waiting for initial Lighter order book data...")
-            timeout = 10  # seconds
-            start_time = time.time()
-            while not self.lighter_order_book_ready and not self.stop_flag:
-                if time.time() - start_time > timeout:
-                    self.logger.warning(f"⚠️ Timeout waiting for Lighter WebSocket order book data after {timeout}s")
-                    break
-                await asyncio.sleep(0.5)
-            
-            if self.lighter_order_book_ready:
-                self.logger.info("✅ Lighter WebSocket order book data received")
-            else:
-                self.logger.warning("⚠️ Lighter WebSocket order book not ready")
-            
-        except Exception as e:
-            self.logger.error(f"❌ Failed to setup Lighter websocket: {e}")
-            return
-
-        await asyncio.sleep(5)
-
-        iterations = 0
-        while iterations < self.iterations and not self.stop_flag:
-            iterations += 1
-            self.logger.info("-----------------------------------------------")
-            self.logger.info(f"🔄 Trading loop iteration {iterations} / {self.iterations}")
-            self.logger.info("-----------------------------------------------")
-
-            self.logger.info(f"[STEP 1] EdgeX position: {self.edgex_position} | Lighter position: {self.lighter_position}")
-
-            if abs(self.edgex_position + self.lighter_position) > self.order_quantity*2:
-                self.logger.error(f"❌ Position diff is too large: {self.edgex_position + self.lighter_position}")
-                break
-
-            self.order_execution_complete = False
-            self.waiting_for_lighter_fill = False
-            try:
-                # Determine side based on some logic (for now, alternate)
-                side = 'buy'
-                await self.place_edgex_post_only_order(side, self.order_quantity)
-            except ValueError as e:
-                if "DEADLINE_EXCEEDED" in str(e):
-                    self.logger.warning(f"⏰ EdgeX order deadline exceeded, retrying in 5 seconds...")
-                    await asyncio.sleep(5)
-                    continue  # Retry the order instead of breaking
+                if position:
+                    position_amt = Decimal(position.get('openSize', 0))
                 else:
-                    self.logger.error(f"⚠️ ValueError in trading loop: {e}")
-                    self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
-                    break
-            except Exception as e:
-                self.logger.error(f"⚠️ Error in trading loop: {e}")
-                self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
-                break
-
-            # Wait for edgeX order to fill and then place Lighter order
-            start_time = time.time()
-            while not self.order_execution_complete and not self.stop_flag:
-                # Check if edgeX order filled and we need to place Lighter order
-                if self.waiting_for_lighter_fill:
-                    await self.place_lighter_limit_order(
-                        self.current_lighter_side,
-                        self.current_lighter_quantity,
-                        self.current_lighter_price
-                    )
-                    break
-                
-                await asyncio.sleep(0.01)
-                if time.time() - start_time > 180:
-                    self.logger.error(f"❌ Timeout waiting for trade completion")
-                    break
-
-            if self.stop_flag:
-                break
-
-            # Sleep after step 1
-            if self.sleep_time > 0:
-                self.logger.info(f"💤 Sleeping {self.sleep_time} seconds after STEP 1...")
-                await asyncio.sleep(self.sleep_time)
-
-            # Close position
-            self.logger.info(f"[STEP 2] EdgeX position: {self.edgex_position} | Lighter position: {self.lighter_position}")
-            self.order_execution_complete = False
-            self.waiting_for_lighter_fill = False
-            try:
-                # Determine side based on some logic (for now, alternate)
-                side = 'sell'
-                await self.place_edgex_post_only_order(side, self.order_quantity)
-            except Exception as e:
-                self.logger.error(f"⚠️ Error in trading loop: {e}")
-                self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
-                break
-
-            # Wait for edgeX order to fill and then place Lighter order
-            start_time2 = time.time()
-            while not self.order_execution_complete and not self.stop_flag:
-                # Check if edgeX order filled and we need to place Lighter order
-                if self.waiting_for_lighter_fill:
-                    await self.place_lighter_limit_order(
-                        self.current_lighter_side,
-                        self.current_lighter_quantity,
-                        self.current_lighter_price
-                    )
-                    break
-                await asyncio.sleep(0.01)
-                if time.time() - start_time2 > 180:
-                    self.logger.error(f"❌ Timeout waiting for trade completion")
-                    break
-
-            # Sleep after step 2
-            if self.sleep_time > 0:
-                self.logger.info(f"💤 Sleeping {self.sleep_time} seconds after STEP 2...")
-                await asyncio.sleep(self.sleep_time)
-            
-            # Close remaining position
-            self.logger.info(f"[STEP 3] EdgeX position: {self.edgex_position} | Lighter position: {self.lighter_position}")
-            self.order_execution_complete = False
-            self.waiting_for_lighter_fill = False
-            if self.edgex_position == 0:
-                continue
-            elif self.edgex_position > 0:
-                side = 'sell'
+                    position_amt = 0
             else:
-                side = 'buy'
+                position_amt = 0
+        return position_amt
 
+    async def trading_loop(self):
+        restart_from_scratch = True
+        iterations = 0
+        while not self.stop_flag and restart_from_scratch:
+            restart_from_scratch = False
+            """Main trading loop implementing the new strategy."""
+            self.logger.info(f"🚀 Starting hedge bot for {self.ticker}")
+            
+            # Initialize clients
             try:
-                # Determine side based on some logic (for now, alternate)
-                await self.place_edgex_post_only_order(side, abs(self.edgex_position))
-            except Exception as e:
-                self.logger.error(f"⚠️ Error in trading loop: {e}")
-                self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
-                break
+                if self.lighter_ws_task:
+                    self.lighter_ws_task.cancel()
+                    self.lighter_ws_task = None
 
-            start_time3 = time.time()
-            while not self.order_execution_complete and not self.stop_flag:
-                # Check if edgeX order filled and we need to place Lighter order
-                if self.waiting_for_lighter_fill:
-                    await self.place_lighter_limit_order(
-                        self.current_lighter_side,
-                        self.current_lighter_quantity,
-                        self.current_lighter_price
-                    )
+                if self.edgex_ws_manager:
+                    self.edgex_ws_manager.disconnect_all()
+                    self.edgex_ws_manager = None
+                
+                await self.initialize_lighter_client()
+                self.initialize_edgex_client()
+                
+                # Get contract info
+                self.edgex_contract_id, self.edgex_tick_size = await self.get_edgex_contract_info()
+                self.lighter_market_index, self.base_amount_multiplier, self.price_multiplier = await self.get_lighter_market_config()
+                
+                self.logger.info(f"Contract info loaded - edgeX: {self.edgex_contract_id}, Lighter: {self.lighter_market_index}")
+                
+            except Exception as e:
+                self.logger.error(f"❌ Failed to initialize: {e}")
+                return
+
+            self.edgex_order_book = {"bids": {}, "asks": {}}
+            self.edgex_best_bid = None
+            self.edgex_best_ask = None
+            self.edgex_order_book_ready = False
+
+            self.lighter_order_book = {"bids": {}, "asks": {}}
+            self.lighter_best_bid = None
+            self.lighter_best_ask = None
+            self.lighter_order_book_ready = False
+            self.lighter_order_book_offset = 0
+            self.lighter_order_book_sequence_gap = False
+            self.lighter_snapshot_loaded = False
+            
+            # Setup edgeX websocket
+            try:
+                await self.setup_edgex_websocket()
+                # Connect both public (for market data) and private (for order updates) websockets
+                self.edgex_ws_manager.connect_public()
+                self.edgex_ws_manager.connect_private()
+                self.logger.info("✅ edgeX WebSocket connections established")
+                
+                # Subscribe to depth channel after connection is established
+                public_client = self.edgex_ws_manager.get_public_client()
+                public_client.subscribe(f"depth.{self.edgex_contract_id}.15")
+                self.logger.info(f"✅ Subscribed to depth channel: depth.{self.edgex_contract_id}.15")
+                
+                # Wait for initial order book data with timeout
+                self.logger.info("⏳ Waiting for initial order book data...")
+                timeout = 10  # seconds
+                start_time = time.time()
+                while not self.edgex_order_book_ready and not self.stop_flag:
+                    if time.time() - start_time > timeout:
+                        self.logger.warning(f"⚠️ Timeout waiting for WebSocket order book data after {timeout}s")
+                        break
+                    await asyncio.sleep(0.5)
+                
+                if self.edgex_order_book_ready:
+                    self.logger.info("✅ WebSocket order book data received")
+                else:
+                    self.logger.warning("⚠️ WebSocket order book not ready, will use REST API fallback")
+                
+            except Exception as e:
+                self.logger.error(f"❌ Failed to setup edgeX websocket: {e}")
+                return
+
+            # Setup Lighter websocket
+            try:
+                self.lighter_ws_task = asyncio.create_task(self.handle_lighter_ws())
+                self.logger.info("✅ Lighter WebSocket task started")
+                
+                # Wait for initial Lighter order book data with timeout
+                self.logger.info("⏳ Waiting for initial Lighter order book data...")
+                timeout = 10  # seconds
+                start_time = time.time()
+                while not self.lighter_order_book_ready and not self.stop_flag:
+                    if time.time() - start_time > timeout:
+                        self.logger.warning(f"⚠️ Timeout waiting for Lighter WebSocket order book data after {timeout}s")
+                        break
+                    await asyncio.sleep(0.5)
+                
+                if self.lighter_order_book_ready:
+                    self.logger.info("✅ Lighter WebSocket order book data received")
+                else:
+                    self.logger.warning("⚠️ Lighter WebSocket order book not ready")
+                
+            except Exception as e:
+                self.logger.error(f"❌ Failed to setup Lighter websocket: {e}")
+                return
+
+            await asyncio.sleep(5)
+
+            self.lighter_position = self.get_lighter_position()
+            self.edgex_position = await self.get_edgex_position()
+            while iterations < self.iterations and not self.stop_flag:
+                if restart_from_scratch:
                     break
-                await asyncio.sleep(0.01)
-                if time.time() - start_time3 > 180:
-                    self.logger.error(f"❌ Timeout waiting for trade completion")
+
+                self.logger.info(f"🔄 Trading loop iteration {iterations}/{self.iterations}")
+                while self.edgex_position < self.max_position and not self.stop_flag:
+                    self.lighter_position = self.get_lighter_position()
+                    self.edgex_position = await self.get_edgex_position()
+                    self.logger.info("-----------------------------------------------")
+                    self.logger.info(f"Buying up to {self.max_position} BTC | EdgeX position: {self.edgex_position} | Lighter position: {self.lighter_position}")
+                    self.logger.info("-----------------------------------------------")
+
+                    if abs(self.edgex_position + self.lighter_position) > self.order_quantity*2:
+                        self.logger.error(f"❌ Position diff is too large: {self.edgex_position + self.lighter_position}")
+                        sys.exit(1)
+
+                    self.order_execution_complete = False
+                    self.waiting_for_lighter_fill = False
+                    try:
+                        # Determine side based on some logic (for now, alternate)
+                        side = 'buy'
+                        await self.place_edgex_post_only_order(side, self.order_quantity)
+                    except ValueError as e:
+                        if "DEADLINE_EXCEEDED" in str(e):
+                            self.logger.warning(f"⏰ EdgeX order deadline exceeded, retrying in 5 seconds...")
+                            await asyncio.sleep(5)
+                            continue  # Retry the order instead of breaking
+                        else:
+                            self.logger.error(f"⚠️ ValueError in trading loop1: {e}")
+                            self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
+                            await asyncio.sleep(60)
+                            restart_from_scratch = True
+                            self.order_execution_complete = False
+                            self.edgex_client_order_id = ''
+                            self.waiting_for_lighter_fill = False
+                            self.lighter_order_filled = False
+                            break
+                    except Exception as e:
+                        self.logger.error(f"⚠️ Error in trading loop: {e}")
+                        self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
+                        self.order_execution_complete = False
+                        self.edgex_client_order_id = ''
+                        self.waiting_for_lighter_fill = False
+                        self.lighter_order_filled = False
+                        await asyncio.sleep(60)
+                        restart_from_scratch = True
+                        break
+
+                    # Wait for edgeX order to fill and then place Lighter order
+                    start_time = time.time()
+                    while not self.order_execution_complete and not self.stop_flag:
+                        # Check if edgeX order filled and we need to place Lighter order
+                        if self.waiting_for_lighter_fill:
+                            await self.place_lighter_limit_order(
+                                self.current_lighter_side,
+                                self.current_lighter_quantity,
+                                self.current_lighter_price
+                            )
+                            break
+                        
+                        await asyncio.sleep(0.01)
+                        if time.time() - start_time > 180:
+                            self.logger.error(f"❌ Timeout waiting for trade completion")
+                            break
+
+                    if self.stop_flag:
+                        break
+
+                if restart_from_scratch:
                     break
+
+                if self.sleep_time > 0:
+                    self.logger.info(f"💤 Sleeping {self.sleep_time} seconds ...")
+                    await asyncio.sleep(self.sleep_time)
+
+                # Close position
+                while self.edgex_position > -self.max_position and not self.stop_flag:
+                    self.lighter_position = self.get_lighter_position()
+                    self.edgex_position = await self.get_edgex_position()
+                    self.logger.info("-----------------------------------------------")
+                    self.logger.info(f"Selling up to -{self.max_position} BTC | EdgeX position: {self.edgex_position} | Lighter position: {self.lighter_position}")
+                    self.logger.info("-----------------------------------------------")
+
+                    self.order_execution_complete = False
+                    self.waiting_for_lighter_fill = False
+                    if iterations+1 == self.iterations:
+                        if self.edgex_position == 0:
+                            self.logger.info("Position is already zero. Done!")
+                            break
+                        if self.edgex_position < 0:
+                            await self.place_edgex_post_only_order('buy', abs(self.edgex_position))
+
+                            start_time_complete = time.time()
+                            while not self.order_execution_complete and not self.stop_flag:
+                                # Check if edgeX order filled and we need to place Lighter order
+                                if self.waiting_for_lighter_fill:
+                                    await self.place_lighter_limit_order(
+                                        self.current_lighter_side,
+                                        self.current_lighter_quantity,
+                                        self.current_lighter_price
+                                    )
+                                    break
+                                await asyncio.sleep(0.01)
+                                if time.time() - start_time_complete > 180:
+                                    self.logger.error(f"❌ Timeout waiting for trade completion")
+                                    break
+                            self.logger.info("Position back to zero. Done!")
+                            break
+
+                    if abs(self.edgex_position + self.lighter_position) > self.order_quantity*2:
+                        self.logger.error(f"❌ Position diff is too large: {self.edgex_position + self.lighter_position}")
+                        sys.exit(1)
+
+                    try:
+                        # Determine side based on some logic (for now, alternate)
+                        side = 'sell'
+                        await self.place_edgex_post_only_order(side, self.order_quantity)
+                    except ValueError as e:
+                        if "DEADLINE_EXCEEDED" in str(e):
+                            self.logger.warning(f"⏰ EdgeX order deadline exceeded, retrying in 5 seconds...")
+                            await asyncio.sleep(5)
+                            continue  # Retry the order instead of breaking
+                        else:
+                            self.logger.error(f"⚠️ ValueError in trading loop2: {e}")
+                            self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
+                            restart_from_scratch = True
+                            self.order_execution_complete = False
+                            self.edgex_client_order_id = ''
+                            self.waiting_for_lighter_fill = False
+                            self.lighter_order_filled = False
+                            await asyncio.sleep(60)
+                            break
+                    except Exception as e:
+                        self.logger.error(f"⚠️ Error in trading loop: {e}")
+                        self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
+                        self.order_execution_complete = False
+                        self.edgex_client_order_id = ''
+                        self.waiting_for_lighter_fill = False
+                        self.lighter_order_filled = False
+                        await asyncio.sleep(60)
+                        restart_from_scratch = True
+                        break
+
+                    # Wait for edgeX order to fill and then place Lighter order
+                    start_time2 = time.time()
+                    while not self.order_execution_complete and not self.stop_flag:
+                        # Check if edgeX order filled and we need to place Lighter order
+                        if self.waiting_for_lighter_fill:
+                            await self.place_lighter_limit_order(
+                                self.current_lighter_side,
+                                self.current_lighter_quantity,
+                                self.current_lighter_price
+                            )
+                            break
+                        await asyncio.sleep(0.01)
+                        if time.time() - start_time2 > 180:
+                            self.logger.error(f"❌ Timeout waiting for trade completion")
+                            break
+                if restart_from_scratch:
+                    break
+                iterations += 1
+            if restart_from_scratch:
+                continue
 
     async def run(self):
         """Run the hedge bot."""
@@ -1243,40 +1396,3 @@ class HedgeBot:
         finally:
             self.logger.info("🔄 Cleaning up...")
             self.shutdown()
-
-
-def parse_arguments():
-    """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description='Trading bot for edgeX and Lighter')
-    parser.add_argument('--ticker', type=str, default='BTC',
-                        help='Ticker symbol (default: BTC)')
-    parser.add_argument('--size', type=str, default='0.001',
-                        help='Number of tokens to buy/sell per order (default: 0.001)')
-    parser.add_argument('--iter', type=int, default=20,
-                        help='Number of iterations to run (default: 20)')
-    parser.add_argument('--fill-timeout', type=int, default=5,
-                        help='Timeout in seconds for maker order fills (default: 5)')
-    parser.add_argument('--sleep', type=int, default=0,
-                        help='Sleep time in seconds after each step (default: 0)')
-
-    return parser.parse_args()
-
-
-async def main():
-    """Main entry point."""
-    args = parse_arguments()
-
-    # Create and run the hedge bot
-    bot = HedgeBot(
-        ticker=args.ticker.upper(),
-        order_quantity=Decimal(args.size),
-        fill_timeout=args.fill_timeout,
-        iterations=args.iter,
-        sleep_time=args.sleep
-    )
-
-    await bot.run()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

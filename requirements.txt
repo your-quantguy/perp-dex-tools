@@ -22,7 +22,10 @@ git+https://github.com/your-quantguy/edgex-python-sdk.git@07425f7522be5845399264
 tenacity>=9.1.2
 
 # Lighter exchange SDK
-git+https://github.com/elliottech/lighter-python.git@d0009799970aad54ebb940aa3dc90cbc00028c54
+lighter-sdk==0.1.4
 
 # Extended exchange SDK
-x10-python-trading-starknet
+x10-python-trading-starknet==0.0.10
+
+# Nado Protocol SDK
+git+https://github.com/your-quantguy/nado-python-sdk.git@7728e97dd030cf744f08afdc0637f7e63b7527e3
