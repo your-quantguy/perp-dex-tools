@@ -3,7 +3,6 @@ Ethereal exchange client skeleton built on the official ethereal-sdk.
 """
 
 import os
-import asyncio
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
@@ -41,13 +40,8 @@ class EtherealClient(BaseExchangeClient):
         # Clients are created lazily in connect()
         self._rest_client: Optional["AsyncRESTClient"] = None
         self._ws_client: Optional["AsyncWSClient"] = None
-        self._ws_task: Optional[asyncio.Task] = None
         self._order_update_handler = None
-        self.current_order: Optional[OrderInfo] = None
         self._product_cache: Dict[str, Any] = {}
-        self._ws_stop = asyncio.Event()
-        self._poll_task: Optional[asyncio.Task] = None
-        self._ws_connected = False
 
         self.logger = TradingLogger(
             exchange="ethereal",
@@ -120,25 +114,24 @@ class EtherealClient(BaseExchangeClient):
             raise ImportError("ethereal-sdk websocket client not available")
 
         self._ws_client = AsyncWSClient({"base_url": self.ws_url})
-        # Register callbacks for likely order event types
-        for key in ("Order", "OrderState", "OrderUpdate"):
-            self._ws_client.callbacks.setdefault(key, []).append(self._handle_ws_message)
 
-        await self._ws_client.open(namespaces=["/v1/stream"])
+        # Set callbacks
+        self._ws_client.callbacks["OrderUpdate"] = [self._handle_ws_message_order_update]
+
+        await self._ws_client.open(namespaces=["/", "/v1/stream"])
+        # connected flag kept for future use
         self._ws_connected = True
 
-        product = await self._get_product_by_ticker(self.config.contract_id or self.config.ticker)
-        product_id = getattr(product, "id", None) if product else None
-
-        # Best-effort subscribe; failures fall back to polling.
+        # Best-effort subscribe
         try:
-            await self._ws_client.subscribe(
-                stream_type="Order",
-                product_id=product_id,
-                subaccount_id=self.subaccount_id,
-            )
+            if self.subaccount_id:
+                await self._ws_client.subscribe(
+                    stream_type="OrderUpdate",
+                    subaccount_id=self.subaccount_id,
+                )
         except Exception as exc:  # pylint: disable=broad-except
-            self.logger.log(f"[ethereal] WS subscribe Order failed: {exc}", "WARNING")
+            self.logger.log(f"[ethereal] WS subscribe failed: {exc}", "WARNING")
+
 
     async def _get_product_by_ticker(self, ticker: Any) -> Optional[Any]:
         products = await self._ensure_products()
@@ -176,68 +169,49 @@ class EtherealClient(BaseExchangeClient):
             raise ValueError("Subaccount name too long for bytes32")
         return "0x" + b.ljust(32, b"\x00").hex()
 
-    async def _handle_ws_message(self, data: Dict[str, Any]):
+    async def _handle_ws_message_order_update(self, data: Dict[str, Any]):
         """Bridge WS order events to the trading bot handler."""
         if not self._order_update_handler:
             return
 
         try:
-            order_id = data.get("orderId") or data.get("id")
-            status = self._normalize_status(data.get("status") or data.get("state"))
-            side_val = data.get("side")
-            side = "buy" if side_val in (0, "buy", "BUY") else "sell"
-            filled_size = data.get("filledSize") or data.get("filled") or 0
-            size = data.get("size") or data.get("quantity") or 0
-            price = data.get("price") or data.get("orderPrice") or 0
+            # Stream data type:
+            # https://docs.ethereal.trade/developer-guides/trading-api/websocket-gateway#subscribe
+            payload = data.get("data") if isinstance(data, dict) and "data" in data else data
+            if not isinstance(payload, list):
+                return
 
-            self._order_update_handler(
-                {
-                    "contract_id": self.config.contract_id,
-                    "order_id": str(order_id),
-                    "status": status or "",
-                    "side": side,
-                    "order_type": "OPEN",
-                    "filled_size": str(filled_size),
-                    "size": str(size),
-                    "price": str(price),
-                }
-            )
+            for order in payload:
+                if not isinstance(order, dict):
+                    continue
+                order_id = order.get("id")
+                status = self._normalize_status(order.get("status") or order.get("state"))
+                side_val = order.get("side")
+                side = "buy" if side_val in (0, "buy", "BUY") else "sell"
+                filled_size = order.get("filled") or 0
+                size = order.get("quantity") or order.get("availableQuantity") or filled_size or 0
+                price = order.get("price") or 0
+                contract_id = order.get("productId") or self.config.contract_id
+                order_type = "CLOSE" if side == self.config.close_order_side else "OPEN"
+
+                if not order_id:
+                    continue
+
+                self._order_update_handler(
+                    {
+                        "contract_id": contract_id,
+                        "order_id": str(order_id),
+                        "status": status or "",
+                        "side": side,
+                        "order_type": order_type,
+                        "filled_size": str(filled_size),
+                        "size": str(size),
+                        "price": str(price),
+                    }
+                )
         except Exception:
             pass
 
-    async def _poll_orders_loop(self):
-        """Simple polling loop to emit order updates to the handler."""
-        last_status: Dict[str, str] = {}
-        while not self._ws_stop.is_set():
-            try:
-                active_orders = await self.get_active_orders(self.config.contract_id)
-                for order in active_orders:
-                    prev = last_status.get(order.order_id)
-                    if prev != order.status:
-                        last_status[order.order_id] = order.status
-                        if self._order_update_handler:
-                            try:
-                                self._order_update_handler(
-                                    {
-                                        "contract_id": self.config.contract_id,
-                                        "order_id": order.order_id,
-                                        "status": order.status,
-                                        "side": order.side,
-                                        "order_type": "OPEN",
-                                        "filled_size": str(order.filled_size),
-                                        "size": str(order.size),
-                                        "price": str(order.price),
-                                    }
-                                )
-                            except Exception:
-                                pass
-            except Exception as exc:
-                self.logger.log(f"[ethereal] order polling error: {exc}", "WARNING")
-
-            try:
-                await asyncio.wait_for(self._ws_stop.wait(), timeout=2.0)
-            except asyncio.TimeoutError:
-                continue
 
     async def connect(self) -> None:
         """
@@ -252,29 +226,15 @@ class EtherealClient(BaseExchangeClient):
         except Exception as exc:
             self.logger.log(f"Failed to preload products: {exc}", "WARNING")
 
-        # Try to open WS for order updates; fall back to polling if it fails or no handler.
+        # Try to open WS for order updates; no REST polling fallback to avoid delays.
         if self._order_update_handler:
             try:
                 await self._start_ws()
             except Exception as exc:
-                self.logger.log(f"WS connect failed, falling back to polling: {exc}", "WARNING")
-                if self._poll_task is None or self._poll_task.done():
-                    self._ws_stop.clear()
-                    self._poll_task = asyncio.create_task(self._poll_orders_loop())
-        else:
-            if self._poll_task is None or self._poll_task.done():
-                self._ws_stop.clear()
-                self._poll_task = asyncio.create_task(self._poll_orders_loop())
+                self.logger.log(f"WS connect failed: {exc}", "ERROR")
 
     async def disconnect(self) -> None:
         """Tear down REST/WS clients."""
-        try:
-            self._ws_stop.set()
-            if self._poll_task and not self._poll_task.done():
-                await self._poll_task
-        except Exception:
-            pass
-
         try:
             if self._ws_client:
                 await self._ws_client.close()
