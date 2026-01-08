@@ -336,9 +336,6 @@ class EtherealClient(BaseExchangeClient):
             return OrderResult(success=False, error_message="Product not found for ticker")
 
         side_val = 0 if side.lower() == "buy" else 1
-        # Use maker-friendly price unless an explicit price is passed (already rounded by caller)
-        best_bid, best_ask = await self._fetch_bbo(product.id)
-        price = self._maker_price("buy" if side_val == 0 else "sell", best_bid, best_ask)
         try:
             order = await self._rest_client.create_order(
                 order_type="LIMIT",
@@ -501,7 +498,12 @@ class EtherealClient(BaseExchangeClient):
         try:
             liquidity = await self._rest_client.get_market_liquidity(product_id=product_id)
         except Exception as exc:
-            self.logger.log(f"[ethereal] get_market_liquidity failed: {exc}", "WARNING")
+            # Log richer context so we know why BBO is missing
+            self.logger.log(
+                f"[ethereal] get_market_liquidity failed for {product_id}: "
+                f"{type(exc).__name__}: {exc!r}",
+                "WARNING",
+            )
             return Decimal(0), Decimal(0)
 
         bids = getattr(liquidity, "bids", None) or []
