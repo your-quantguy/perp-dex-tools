@@ -29,3 +29,6 @@ x10-python-trading-starknet==0.0.10
 
 # Nado Protocol SDK
 git+https://github.com/your-quantguy/nado-python-sdk.git@7728e97dd030cf744f08afdc0637f7e63b7527e3
+
+# Ethereal exchange SDK
+ethereal-sdk==0.1.0b23
