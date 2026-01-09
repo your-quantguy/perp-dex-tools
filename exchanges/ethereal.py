@@ -163,6 +163,17 @@ class EtherealClient(BaseExchangeClient):
 
         return None
 
+    async def get_ticker_by_product_id(self, product_id: Any) -> Optional[str]:
+        """Look up ticker string from a product id."""
+        if product_id is None:
+            return None
+        products = await self._ensure_products()
+        pid = str(product_id)
+        for ticker_key, prod in products.items():
+            if str(getattr(prod, "id", "")) == pid:
+                return ticker_key
+        return None
+
     def _product_id_to_str(self, product: Any) -> Optional[str]:
         """Extract product id as string."""
         if not product:
@@ -634,6 +645,7 @@ class EtherealClient(BaseExchangeClient):
         self.logger.log("No position endpoint available on Ethereal client", "ERROR")
         return []
 
+    
     def _extract_positions(self, resp: Any) -> List[Any]:
         """Normalize common Ethereal SDK response shapes to a list."""
         if resp is None:
