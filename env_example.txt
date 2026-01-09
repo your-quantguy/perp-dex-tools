@@ -56,7 +56,7 @@ NADO_MODE=MAINNET  # or DEVNET
 # Ethereal Configuration
 ETHEREAL_BASE_URL=https://api.ethereal.trade
 ETHEREAL_RPC_URL=https://rpc.ethereal.trade
-ETHEREAL_CHAIN_ID=42161
+ETHEREAL_CHAIN_ID=5064014
 ETHEREAL_PRIVATE_KEY=your_private_key # required for signing orders
 ETHEREAL_SUBACCOUNT_ID=your_subaccount_id
 ETHEREAL_ACCOUNT_NAME=primary

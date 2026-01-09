@@ -43,6 +43,8 @@ class EtherealClient(BaseExchangeClient):
         self._ws_client: Optional["AsyncWSClient"] = None
         self._order_update_handler = None
         self._product_cache: Dict[str, Any] = {}
+        self._contract_to_product_id: Dict[str, UUID] = {}
+        self._product_id_to_contract: Dict[UUID, str] = {}
         self._ws_task: Optional[asyncio.Task] = None
         self._ws_stop: Optional[asyncio.Event] = None
 
@@ -55,15 +57,43 @@ class EtherealClient(BaseExchangeClient):
         # Base init last: sets self.config and runs _validate_config
         super().__init__(config)
 
+    @staticmethod
+    def _normalize_contract_id(value: Optional[str]) -> str:
+        """Normalize contract id to uppercase ticker+USD form."""
+        raw = value or ""
+        try:
+            return str(UUID(str(raw)))
+        except Exception:
+            pass
+        cid = str(raw).upper()
+        if cid and not cid.endswith("USD"):
+            cid = f"{cid}USD"
+        return cid
+
+    @staticmethod
+    def _as_uuid(value: Any) -> Optional[UUID]:
+        """Convert value to UUID if possible."""
+        if isinstance(value, UUID):
+            return value
+        try:
+            return UUID(str(value))
+        except Exception:
+            return None
+
     def _validate_config(self) -> None:
         """Validate Ethereal configuration."""
-        # Ticker is required; contract_id is optional (will default to ticker if missing).
+        # Ticker is required; contract_id always normalized to ticker+USD.
         if not getattr(self.config, "ticker", None):
             raise ValueError("Missing required config field: ticker")
-        if not getattr(self.config, "contract_id", None):
-            self.config.contract_id = str(self.config.ticker)
-        else:
-            self.config.contract_id = str(self.config.contract_id)
+        ticker_val = str(self.config.ticker).upper()
+        self.config.ticker = ticker_val
+        contract_val = getattr(self.config, "contract_id", None)
+        normalized_contract = (
+            self._normalize_contract_id(str(contract_val))
+            if contract_val
+            else self._normalize_contract_id(ticker_val)
+        )
+        self.config.contract_id = normalized_contract
 
         # Signing key is optional for read-only calls, but required for trading.
         if not getattr(self, "private_key", None):
@@ -101,16 +131,36 @@ class EtherealClient(BaseExchangeClient):
         if AsyncRESTClient is None:
             raise ImportError("ethereal-sdk not installed or not available in this environment")
 
-        self._rest_client = await AsyncRESTClient.create(self._build_rest_config())
+        try:
+            self._rest_client = await AsyncRESTClient.create(self._build_rest_config())
+        except Exception as exc:
+            self.logger.log(f"[ethereal] failed to create REST client: {exc}", "ERROR")
+            raise
 
     async def _ensure_products(self) -> Dict[str, Any]:
         """Cache products by ticker for quick lookups."""
         if self._product_cache:
             return self._product_cache
         await self._ensure_rest_client()
-        products = await self._rest_client.products_by_ticker()
-        # store uppercase keys
-        self._product_cache = {k.upper(): v for k, v in products.items()}
+        try:
+            products = await self._rest_client.products_by_ticker()
+            # store uppercase keys
+            cache = {k.upper(): v for k, v in products.items()}
+            self._product_cache = cache
+            self._contract_to_product_id = {}
+            self._product_id_to_contract = {}
+            for ticker_key, prod in cache.items():
+                pid = getattr(prod, "id", None)
+                pid_uuid = self._as_uuid(pid)
+                if pid_uuid:
+                    contract_key = self._normalize_contract_id(ticker_key)
+                    self._contract_to_product_id[contract_key] = pid_uuid
+                    self._product_id_to_contract[pid_uuid] = contract_key
+        except Exception as exc:
+            self.logger.log(f"[ethereal] products_by_ticker failed: {exc}", "WARNING")
+            self._product_cache = {}
+            self._contract_to_product_id = {}
+            self._product_id_to_contract = {}
         return self._product_cache
 
     async def _start_ws(self) -> None:
@@ -172,50 +222,66 @@ class EtherealClient(BaseExchangeClient):
             backoff = min(60.0, backoff * 2)
         self._ws_connected = False
 
-    async def _get_product_by_ticker(self, ticker: Any) -> Optional[Any]:
+    async def _get_product_by_contract_id(self, contract_id: Any) -> Optional[Any]:
+        """Resolve a product using contract_id (ticker+USD) or product_id."""
         products = await self._ensure_products()
-        if ticker is None:
+        if contract_id is None:
             return None
 
-        # Normalize ticker/id to string for comparison
-        if isinstance(ticker, UUID):
-            ticker_str = str(ticker)
-        else:
-            ticker_str = str(ticker)
+        contract_key = self._normalize_contract_id(str(contract_id))
+        if contract_key in products:
+            return products[contract_key]
 
-        # First try matching by product id
-        for item in products.values():
-            if str(getattr(item, "id", "")) == ticker_str:
-                return item
-
-        # Then try ticker-based lookup (expects e.g. BTCUSD)
-        key = ticker_str.upper()
-        if key.endswith("USD"):
-            prod = products.get(key)
-        else:
-            prod = products.get(f"{key}USD")
-        if prod:
-            return prod
-
+        pid = self._as_uuid(contract_id)
+        if pid:
+            for item in products.values():
+                if getattr(item, "id", None) == pid:
+                    return item
         return None
+
+    async def _get_product_id_for_contract_id(self, contract_id: Any) -> Optional[UUID]:
+        """Map normalized contract_id to product_id (UUID)."""
+        await self._ensure_products()
+        if contract_id is None:
+            return None
+
+        contract_key = self._normalize_contract_id(str(contract_id))
+        pid = self._contract_to_product_id.get(contract_key)
+        if pid:
+            return pid
+
+        product = await self._get_product_by_contract_id(contract_key)
+        if product:
+            pid_val = self._as_uuid(getattr(product, "id", None))
+            resolved_contract = self._normalize_contract_id(getattr(product, "ticker", contract_key))
+            if pid_val:
+                self._contract_to_product_id[resolved_contract] = pid_val
+                self._product_id_to_contract[pid_val] = resolved_contract
+                return pid_val
+
+        fallback = self._as_uuid(contract_id)
+        return fallback
 
     async def get_ticker_by_product_id(self, product_id: Any) -> Optional[str]:
         """Look up ticker string from a product id."""
         if product_id is None:
             return None
-        products = await self._ensure_products()
-        pid = str(product_id)
-        for ticker_key, prod in products.items():
-            if str(getattr(prod, "id", "")) == pid:
-                return ticker_key
-        return None
-
-    def _product_id_to_str(self, product: Any) -> Optional[str]:
-        """Extract product id as string."""
-        if not product:
+        await self._ensure_products()
+        pid = self._as_uuid(product_id)
+        if pid is None:
             return None
-        pid = getattr(product, "id", None)
-        return str(pid) if pid is not None else None
+        ticker_cached = self._product_id_to_contract.get(pid)
+        if ticker_cached:
+            return ticker_cached
+
+        products = await self._ensure_products()
+        for ticker_key, prod in products.items():
+            if getattr(prod, "id", None) == pid:
+                contract_key = self._normalize_contract_id(ticker_key)
+                self._contract_to_product_id[contract_key] = pid
+                self._product_id_to_contract[pid] = contract_key
+                return contract_key
+        return None
 
     def _encode_subaccount_name(self, name: str) -> str:
         """Encode subaccount name to bytes32 hex (0x...)."""
@@ -249,7 +315,17 @@ class EtherealClient(BaseExchangeClient):
                 size = order.get("quantity") or order.get("availableQuantity") or filled_size or 0
                 price = order.get("price") or 0
                 product_id_val = order.get("productId")
-                contract_id = str(product_id_val) if product_id_val is not None else str(self.config.contract_id)
+                contract_id = None
+                if product_id_val is not None:
+                    pid_uuid = self._as_uuid(product_id_val)
+                    if pid_uuid:
+                        contract_id = self._product_id_to_contract.get(pid_uuid)
+                    if not contract_id:
+                        try:
+                            contract_id = await self.get_ticker_by_product_id(product_id_val)
+                        except Exception:
+                            contract_id = None
+                contract_id = contract_id or str(self.config.contract_id)
                 order_type = "CLOSE" if side == self.config.close_order_side else "OPEN"
 
                 if not order_id:
@@ -345,13 +421,9 @@ class EtherealClient(BaseExchangeClient):
                 error_message="Missing ETHEREAL_PRIVATE_KEY or ETHEREAL_SUBACCOUNT_ID"
             )
 
-        product = await self._get_product_by_ticker(contract_id or self.config.contract_id)
-        if not product:
-            return OrderResult(success=False, error_message="Product not found for ticker")
-
-        product_id = self._product_id_to_str(product)
+        product_id = await self._get_product_id_for_contract_id(contract_id or self.config.contract_id)
         if not product_id:
-            return OrderResult(success=False, error_message="Product id missing")
+            return OrderResult(success=False, error_message="Product not found for ticker")
 
         best_bid, best_ask = await self._fetch_bbo(product_id)
         if best_bid == 0 and best_ask == 0:
@@ -430,13 +502,9 @@ class EtherealClient(BaseExchangeClient):
                 error_message="Missing ETHEREAL_PRIVATE_KEY or ETHEREAL_SUBACCOUNT_ID"
             )
 
-        product = await self._get_product_by_ticker(contract_id or self.config.contract_id)
-        if not product:
-            return OrderResult(success=False, error_message="Product not found for ticker")
-
-        product_id = self._product_id_to_str(product)
+        product_id = await self._get_product_id_for_contract_id(contract_id or self.config.contract_id)
         if not product_id:
-            return OrderResult(success=False, error_message="Product id missing")
+            return OrderResult(success=False, error_message="Product not found for ticker")
 
         # Ensure price respects tick size to avoid 400 from the API
         tick = self.config.tick_size or Decimal(0)
@@ -569,8 +637,10 @@ class EtherealClient(BaseExchangeClient):
             self.logger.log("ETHEREAL_SUBACCOUNT_ID not set; cannot fetch active orders.", "WARNING")
             return []
 
-        product = await self._get_product_by_ticker(contract_id)
-        product_id = self._product_id_to_str(product)
+        product_id = await self._get_product_id_for_contract_id(contract_id)
+
+        if not product_id:
+            return []
 
         try:
             orders = await self._rest_client.list_orders(
@@ -612,13 +682,9 @@ class EtherealClient(BaseExchangeClient):
 
         Uses current BBO to place near-touching maker orders.
         """
-        product = await self._get_product_by_ticker(self.config.contract_id or self.config.ticker)
-        if not product:
-            raise ValueError("Product not found for ticker")
-
-        product_id = self._product_id_to_str(product)
+        product_id = await self._get_product_id_for_contract_id(self.config.contract_id or self.config.ticker)
         if not product_id:
-            raise ValueError("Product id missing")
+            raise ValueError("Product not found for ticker")
 
         best_bid, best_ask = await self._fetch_bbo(product_id)
         if best_bid <= 0 or best_ask <= 0:
@@ -633,10 +699,7 @@ class EtherealClient(BaseExchangeClient):
 
     async def fetch_bbo_prices(self, contract_id: str) -> Tuple[Decimal, Decimal]:
         """Expose BBO for TradingBot stop/price checks."""
-        product = await self._get_product_by_ticker(contract_id or self.config.contract_id)
-        if not product:
-            return Decimal(0), Decimal(0)
-        product_id = self._product_id_to_str(product)
+        product_id = await self._get_product_id_for_contract_id(contract_id or self.config.contract_id)
         if not product_id:
             return Decimal(0), Decimal(0)
         return await self._fetch_bbo(product_id)
@@ -650,7 +713,7 @@ class EtherealClient(BaseExchangeClient):
         wait = 0.2
         for attempt in range(max_attempts):
             try:
-                liquidity = await self._rest_client.get_market_liquidity(product_id=str(product_id))
+                liquidity = await self._rest_client.get_market_liquidity(product_id=product_id)
 
                 bids = getattr(liquidity, "bids", None) or []
                 asks = getattr(liquidity, "asks", None) or []
@@ -672,7 +735,7 @@ class EtherealClient(BaseExchangeClient):
                     except Exception:
                         wait = max(wait, 1.0)
 
-                if attempt % 5 == 0:
+                if attempt + 1 % 5 == 0:
                     self.logger.log(
                         f"[ethereal] get_market_liquidity failed for {product_id} "
                         f"(attempt {attempt + 1}/{max_attempts}): {type(exc).__name__}: {exc}",
@@ -719,135 +782,6 @@ class EtherealClient(BaseExchangeClient):
         self.logger.log("No position endpoint available on Ethereal client", "ERROR")
         return []
 
-    async def get_positions_metrics(self, tickers: Optional[List[str]] = None) -> List[Dict[str, Any]]:
-        """
-        Fetch positions and normalize key metrics for monitoring.
-
-        Returns a list of dicts with: symbol, side, size, entry_price, mark_price,
-        liquidation_price, margin_ratio, maintenance_margin, unrealized_pnl, notional.
-        """
-        positions = await self.list_positions()
-        tickers_upper = [t.upper() for t in tickers or []]
-
-        def safe_dec(val: Any) -> Optional[Decimal]:
-            try:
-                if val is None:
-                    return None
-                return Decimal(str(val))
-            except Exception:
-                return None
-
-        metrics: List[Dict[str, Any]] = []
-        for pos in positions:
-            product_id = (
-                pos.get("product_id")
-                if isinstance(pos, dict)
-                else getattr(pos, "product_id", None)
-            ) or (
-                pos.get("productId")
-                if isinstance(pos, dict)
-                else getattr(pos, "productId", None)
-            )
-
-            symbol = None
-            if tickers_upper:
-                try:
-                    symbol = await self.get_ticker_by_product_id(product_id)
-                except Exception:
-                    symbol = None
-            if not symbol:
-                symbol = await self.get_ticker_by_product_id(product_id)
-            if not symbol:
-                symbol = str(product_id) if product_id is not None else "UNKNOWN"
-
-            size = safe_dec(
-                pos.get("size") if isinstance(pos, dict) else getattr(pos, "size", None)
-            ) or Decimal(0)
-
-            # Skip zero/flat positions
-            if size == 0:
-                continue
-
-            entry_price = safe_dec(
-                pos.get("entry_price") if isinstance(pos, dict) else getattr(pos, "entry_price", None)
-            ) or safe_dec(
-                pos.get("avgEntryPrice") if isinstance(pos, dict) else getattr(pos, "avgEntryPrice", None)
-            )
-            mark_price = safe_dec(
-                pos.get("mark_price") if isinstance(pos, dict) else getattr(pos, "mark_price", None)
-            ) or safe_dec(
-                pos.get("markPrice") if isinstance(pos, dict) else getattr(pos, "markPrice", None)
-            )
-            liquidation_price = safe_dec(
-                pos.get("liquidation_price") if isinstance(pos, dict) else getattr(pos, "liquidation_price", None)
-            ) or safe_dec(
-                pos.get("liquidationPrice") if isinstance(pos, dict) else getattr(pos, "liquidationPrice", None)
-            )
-            maintenance_margin = safe_dec(
-                pos.get("maintenance_margin") if isinstance(pos, dict) else getattr(pos, "maintenance_margin", None)
-            ) or safe_dec(
-                pos.get("maintenanceMargin") if isinstance(pos, dict) else getattr(pos, "maintenanceMargin", None)
-            )
-            margin_ratio = safe_dec(
-                pos.get("margin_ratio") if isinstance(pos, dict) else getattr(pos, "margin_ratio", None)
-            ) or safe_dec(
-                pos.get("marginRatio") if isinstance(pos, dict) else getattr(pos, "marginRatio", None)
-            )
-            unrealized_pnl = safe_dec(
-                pos.get("unrealized_pnl") if isinstance(pos, dict) else getattr(pos, "unrealized_pnl", None)
-            ) or safe_dec(
-                pos.get("unrealizedPnl") if isinstance(pos, dict) else getattr(pos, "unrealizedPnl", None)
-            )
-
-            # Notional estimate: prefer mark_price * size, fallback to cost
-            notional = None
-            if mark_price is not None:
-                notional = abs(size * mark_price)
-            elif isinstance(pos, dict) and "cost" in pos:
-                notional = safe_dec(pos.get("cost"))
-            else:
-                notional = safe_dec(getattr(pos, "cost", None))
-
-            raw_side = (
-                pos.get("side") if isinstance(pos, dict) else getattr(pos, "side", None)
-            )
-            side = ""
-            if raw_side is not None:
-                s = str(raw_side).lower()
-                if s in ("buy", "long", "1", "side.buy"):
-                    side = "long"
-                elif s in ("sell", "short", "-1", "side.sell"):
-                    side = "short"
-            if not side:
-                if size > 0:
-                    side = "long"
-                elif size < 0:
-                    side = "short"
-                else:
-                    side = "flat"
-
-            metric = {
-                "symbol": symbol,
-                "side": side,
-                "size": size,
-                "entry_price": entry_price,
-                "mark_price": mark_price,
-                "liquidation_price": liquidation_price,
-                "maintenance_margin": maintenance_margin,
-                "margin_ratio": margin_ratio,
-                "unrealized_pnl": unrealized_pnl,
-                "notional": notional,
-            }
-
-            if tickers_upper:
-                sym_up = (symbol or "").upper()
-                if not any(t in sym_up for t in tickers_upper):
-                    continue
-
-            metrics.append(metric)
-
-        return metrics
-
     def _extract_positions(self, resp: Any) -> List[Any]:
         """Normalize common Ethereal SDK response shapes to a list."""
         if resp is None:
@@ -890,7 +824,7 @@ class EtherealClient(BaseExchangeClient):
         """
         await self._ensure_rest_client()
         positions = await self.list_positions()
-        target_id = str(self.config.contract_id)
+        target_pid = await self._get_product_id_for_contract_id(self.config.contract_id)
         for pos in positions:
             product_id = (
                 pos.get("product_id")
@@ -904,7 +838,8 @@ class EtherealClient(BaseExchangeClient):
                     else getattr(pos, "productId", None)
                 )
 
-            if product_id and str(product_id) == target_id:
+            pid_uuid = self._as_uuid(product_id)
+            if target_pid and pid_uuid and pid_uuid == target_pid:
                 size_val = (
                     pos.get("size")
                     if isinstance(pos, dict)
@@ -927,13 +862,18 @@ class EtherealClient(BaseExchangeClient):
         if not ticker:
             raise ValueError("Ticker is empty")
 
-        product = await self._get_product_by_ticker(ticker)
+        product = await self._get_product_by_contract_id(self.config.contract_id) or await self._get_product_by_contract_id(ticker)
         if product:
-            self.config.contract_id = str(getattr(product, "id", ticker.upper()))
+            contract_key = self._normalize_contract_id(getattr(product, "ticker", ticker))
+            pid = self._as_uuid(getattr(product, "id", None))
+            self.config.contract_id = contract_key
             tick_size_val = getattr(product, "tick_size", None)
             self.config.tick_size = Decimal(str(tick_size_val)) if tick_size_val else Decimal(0)
+            if contract_key and pid:
+                self._contract_to_product_id[contract_key] = pid
+                self._product_id_to_contract[pid] = contract_key
         else:
-            self.config.contract_id = ticker.upper()
+            self.config.contract_id = self._normalize_contract_id(ticker)
             self.config.tick_size = Decimal(0)
 
         return self.config.contract_id, self.config.tick_size
