@@ -43,6 +43,8 @@ class EtherealClient(BaseExchangeClient):
         self._ws_client: Optional["AsyncWSClient"] = None
         self._order_update_handler = None
         self._product_cache: Dict[str, Any] = {}
+        self._ws_task: Optional[asyncio.Task] = None
+        self._ws_stop: Optional[asyncio.Event] = None
 
         self.logger = TradingLogger(
             exchange="ethereal",
@@ -134,7 +136,41 @@ class EtherealClient(BaseExchangeClient):
                 )
         except Exception as exc:  # pylint: disable=broad-except
             self.logger.log(f"[ethereal] WS subscribe failed: {exc}", "WARNING")
+        return True
 
+    async def _ws_reconnect_loop(self) -> None:
+        """Keep WS alive; reconnect proactively to handle 12h disconnects."""
+        backoff = 1.0
+        # Reconnect a bit before the 12h window (11h) to avoid server closes.
+        max_uptime = 60 * 60 * 11
+
+        while self._ws_stop and not self._ws_stop.is_set():
+            try:
+                await self._start_ws()
+                self.logger.log("[ethereal] WS connected", "INFO")
+                backoff = 1.0
+
+                # Wait for either stop signal or proactive reconnect timeout
+                try:
+                    await asyncio.wait_for(self._ws_stop.wait(), timeout=max_uptime)
+                    break
+                except asyncio.TimeoutError:
+                    # proactive reconnect
+                    self.logger.log("[ethereal] WS proactive reconnect", "INFO")
+                except Exception:
+                    break
+            except Exception as exc:
+                self.logger.log(f"[ethereal] WS connect error: {exc}", "ERROR")
+            finally:
+                try:
+                    if self._ws_client:
+                        await self._ws_client.close()
+                except Exception:
+                    pass
+
+            await asyncio.sleep(backoff)
+            backoff = min(60.0, backoff * 2)
+        self._ws_connected = False
 
     async def _get_product_by_ticker(self, ticker: Any) -> Optional[Any]:
         products = await self._ensure_products()
@@ -250,20 +286,26 @@ class EtherealClient(BaseExchangeClient):
 
         # Try to open WS for order updates; no REST polling fallback to avoid delays.
         if self._order_update_handler:
-            try:
-                await self._start_ws()
-            except Exception as exc:
-                self.logger.log(f"WS connect failed: {exc}", "ERROR")
+            if not self._ws_stop:
+                self._ws_stop = asyncio.Event()
+            if not self._ws_task or self._ws_task.done():
+                self._ws_task = asyncio.create_task(self._ws_reconnect_loop())
 
     async def disconnect(self) -> None:
         """Tear down REST/WS clients."""
         try:
+            if self._ws_stop:
+                self._ws_stop.set()
+            if self._ws_task:
+                await self._ws_task
             if self._ws_client:
                 await self._ws_client.close()
         except Exception as exc:
             self.logger.log(f"Error closing Ethereal WS client: {exc}", "ERROR")
         self._ws_connected = False
         self._ws_client = None
+        self._ws_task = None
+        self._ws_stop = None
 
         try:
             if self._rest_client and hasattr(self._rest_client, "close"):
@@ -630,11 +672,12 @@ class EtherealClient(BaseExchangeClient):
                     except Exception:
                         wait = max(wait, 1.0)
 
-                self.logger.log(
-                    f"[ethereal] get_market_liquidity failed for {product_id} "
-                    f"(attempt {attempt + 1}/{max_attempts}): {type(exc).__name__}: {exc}",
-                    "WARNING",
-                )
+                if attempt % 5 == 0:
+                    self.logger.log(
+                        f"[ethereal] get_market_liquidity failed for {product_id} "
+                        f"(attempt {attempt + 1}/{max_attempts}): {type(exc).__name__}: {exc}",
+                        "WARNING",
+                    )
                 if attempt < max_attempts - 1:
                     await asyncio.sleep(wait)
                     if status == 429:
