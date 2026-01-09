@@ -616,6 +616,20 @@ class EtherealClient(BaseExchangeClient):
                 best_ask = Decimal(str(asks[0][0])) if asks else Decimal(0)
                 return best_bid, best_ask
             except Exception as exc:
+                status = None
+                retry_after = None
+                try:
+                    status = getattr(getattr(exc, "response", None), "status_code", None)
+                    retry_after = getattr(getattr(exc, "response", None), "headers", {}).get("Retry-After")
+                except Exception:
+                    pass
+
+                if status == 429 and retry_after:
+                    try:
+                        wait = max(wait, float(retry_after))
+                    except Exception:
+                        wait = max(wait, 1.0)
+
                 self.logger.log(
                     f"[ethereal] get_market_liquidity failed for {product_id} "
                     f"(attempt {attempt + 1}/{max_attempts}): {type(exc).__name__}: {exc}",
@@ -623,7 +637,10 @@ class EtherealClient(BaseExchangeClient):
                 )
                 if attempt < max_attempts - 1:
                     await asyncio.sleep(wait)
-                    wait = min(1.0, wait * 2)
+                    if status == 429:
+                        wait = min(5.0, wait * 2)
+                    else:
+                        wait = min(1.0, wait * 2)
                     continue
                 return Decimal(0), Decimal(0)
 
