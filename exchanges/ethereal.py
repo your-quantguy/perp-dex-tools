@@ -3,11 +3,12 @@ Ethereal exchange client skeleton built on the official ethereal-sdk.
 """
 
 import os
+import asyncio
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
 
-from .base import BaseExchangeClient, OrderResult, OrderInfo
+from .base import BaseExchangeClient, OrderResult, OrderInfo, query_retry
 from helpers.logger import TradingLogger
 from ethereal import AsyncRESTClient, AsyncWSClient
 
@@ -58,7 +59,9 @@ class EtherealClient(BaseExchangeClient):
         if not getattr(self.config, "ticker", None):
             raise ValueError("Missing required config field: ticker")
         if not getattr(self.config, "contract_id", None):
-            self.config.contract_id = self.config.ticker
+            self.config.contract_id = str(self.config.ticker)
+        else:
+            self.config.contract_id = str(self.config.contract_id)
 
         # Signing key is optional for read-only calls, but required for trading.
         if not getattr(self, "private_key", None):
@@ -160,6 +163,13 @@ class EtherealClient(BaseExchangeClient):
 
         return None
 
+    def _product_id_to_str(self, product: Any) -> Optional[str]:
+        """Extract product id as string."""
+        if not product:
+            return None
+        pid = getattr(product, "id", None)
+        return str(pid) if pid is not None else None
+
     def _encode_subaccount_name(self, name: str) -> str:
         """Encode subaccount name to bytes32 hex (0x...)."""
         if not name:
@@ -191,7 +201,8 @@ class EtherealClient(BaseExchangeClient):
                 filled_size = order.get("filled") or 0
                 size = order.get("quantity") or order.get("availableQuantity") or filled_size or 0
                 price = order.get("price") or 0
-                contract_id = order.get("productId") or self.config.contract_id
+                product_id_val = order.get("productId")
+                contract_id = str(product_id_val) if product_id_val is not None else str(self.config.contract_id)
                 order_type = "CLOSE" if side == self.config.close_order_side else "OPEN"
 
                 if not order_id:
@@ -285,20 +296,30 @@ class EtherealClient(BaseExchangeClient):
         if not product:
             return OrderResult(success=False, error_message="Product not found for ticker")
 
-        best_bid, best_ask = await self._fetch_bbo(product.id)
+        product_id = self._product_id_to_str(product)
+        if not product_id:
+            return OrderResult(success=False, error_message="Product id missing")
+
+        best_bid, best_ask = await self._fetch_bbo(product_id)
         if best_bid == 0 and best_ask == 0:
             return OrderResult(success=False, error_message="Failed to fetch order book")
-
+        
+        # Determine order side and price
         side = 0 if direction == "buy" else 1
-        price = self._maker_price(direction, best_bid, best_ask)
+        if direction == 'buy':
+            order_price = best_ask - self.config.tick_size
+        elif direction == 'sell':
+            order_price = best_bid + self.config.tick_size
+        else:
+            raise Exception(f"[OPEN] Invalid direction: {direction}")
 
         try:
             order = await self._rest_client.create_order(
                 order_type="LIMIT",
                 quantity=float(quantity),
                 side=side,
-                price=float(price),
-                product_id=product.id,
+                price=float(order_price),
+                product_id=product_id,
                 subaccount=self.subaccount_hex,
                 time_in_force="GTD",
                 post_only=True,
@@ -307,13 +328,38 @@ class EtherealClient(BaseExchangeClient):
             return OrderResult(success=False, error_message=str(exc))
 
         order_id = getattr(order, "id", None) or (order.get("id") if isinstance(order, dict) else None)
+        status = self._normalize_status(getattr(order, "status", "OPEN") if order_id else "FAILED")
+
+        # Check order status after a short delay to see if it was rejected
+        order_info: Optional[OrderInfo] = None
+        if order_id:
+            try:
+                await asyncio.sleep(0.01)
+                order_info = await self.get_order_info(str(order_id))
+                if order_info:
+                    status = order_info.status or status
+                    if status == "CANCELED":
+                        return OrderResult(
+                            success=False,
+                            order_id=str(order_id),
+                            side="buy" if side == 0 else "sell",
+                            size=Decimal(str(quantity)),
+                            price=Decimal(str(order_price)),
+                            status=status,
+                            error_message="Order rejected after placement",
+                            filled_size=order_info.filled_size,
+                        )
+            except Exception:
+                pass
+
         return OrderResult(
             success=bool(order_id),
             order_id=str(order_id) if order_id else None,
             side="buy" if side == 0 else "sell",
             size=Decimal(str(quantity)),
-            price=Decimal(str(price)),
-            status=getattr(order, "status", "OPEN") if order_id else "FAILED",
+            price=Decimal(str(order_price)),
+            status=status,
+            filled_size=order_info.filled_size if order_info else None,
         )
 
     async def place_close_order(self, contract_id: str, quantity: Decimal, price: Decimal, side: str) -> OrderResult:
@@ -335,6 +381,14 @@ class EtherealClient(BaseExchangeClient):
         if not product:
             return OrderResult(success=False, error_message="Product not found for ticker")
 
+        product_id = self._product_id_to_str(product)
+        if not product_id:
+            return OrderResult(success=False, error_message="Product id missing")
+
+        # Ensure price respects tick size to avoid 400 from the API
+        tick = self.config.tick_size or Decimal(0)
+        price = self.round_to_tick(price) if tick > 0 else Decimal(str(price))
+
         side_val = 0 if side.lower() == "buy" else 1
         try:
             order = await self._rest_client.create_order(
@@ -342,7 +396,7 @@ class EtherealClient(BaseExchangeClient):
                 quantity=float(quantity),
                 side=side_val,
                 price=float(price),
-                product_id=product.id,
+                product_id=product_id,
                 subaccount=self.subaccount_hex,
                 time_in_force="GTD",
                 reduce_only=True,
@@ -352,13 +406,38 @@ class EtherealClient(BaseExchangeClient):
             return OrderResult(success=False, error_message=str(exc))
 
         order_id = getattr(order, "id", None) or (order.get("id") if isinstance(order, dict) else None)
+        status = self._normalize_status(getattr(order, "status", "OPEN") if order_id else "FAILED")
+
+        # Check order status after a short delay to see if it was rejected
+        order_info: Optional[OrderInfo] = None
+        if order_id:
+            try:
+                await asyncio.sleep(0.01)
+                order_info = await self.get_order_info(str(order_id))
+                if order_info:
+                    status = order_info.status or status
+                    if status == "CANCELED":
+                        return OrderResult(
+                            success=False,
+                            order_id=str(order_id),
+                            side="buy" if side_val == 0 else "sell",
+                            size=Decimal(str(quantity)),
+                            price=Decimal(str(price)),
+                            status=status,
+                            error_message="Close order rejected after placement",
+                            filled_size=order_info.filled_size,
+                        )
+            except Exception:
+                pass
+
         return OrderResult(
             success=bool(order_id),
             order_id=str(order_id) if order_id else None,
             side="buy" if side_val == 0 else "sell",
             size=Decimal(str(quantity)),
             price=Decimal(str(price)),
-            status=getattr(order, "status", "OPEN") if order_id else "FAILED",
+            status=status,
+            filled_size=order_info.filled_size if order_info else None,
         )
 
     async def cancel_order(self, order_id: str) -> OrderResult:
@@ -438,7 +517,7 @@ class EtherealClient(BaseExchangeClient):
             return []
 
         product = await self._get_product_by_ticker(contract_id)
-        product_id = getattr(product, "id", None) if product else None
+        product_id = self._product_id_to_str(product)
 
         try:
             orders = await self._rest_client.list_orders(
@@ -483,48 +562,45 @@ class EtherealClient(BaseExchangeClient):
         product = await self._get_product_by_ticker(self.config.contract_id or self.config.ticker)
         if not product:
             raise ValueError("Product not found for ticker")
-        best_bid, best_ask = await self._fetch_bbo(product.id)
-        return self._maker_price(direction, best_bid, best_ask)
+
+        product_id = self._product_id_to_str(product)
+        if not product_id:
+            raise ValueError("Product id missing")
+
+        best_bid, best_ask = await self._fetch_bbo(product_id)
+        if best_bid <= 0 or best_ask <= 0:
+            raise ValueError("Invalid bid/ask prices")
+
+        if direction == 'buy':
+            return best_ask - self.config.tick_size
+        elif direction == 'sell':
+            return best_bid + self.config.tick_size
+        else:
+            raise ValueError("Invalid direction")
 
     async def fetch_bbo_prices(self, contract_id: str) -> Tuple[Decimal, Decimal]:
         """Expose BBO for TradingBot stop/price checks."""
         product = await self._get_product_by_ticker(contract_id or self.config.contract_id)
         if not product:
             return Decimal(0), Decimal(0)
-        return await self._fetch_bbo(product.id)
+        product_id = self._product_id_to_str(product)
+        if not product_id:
+            return Decimal(0), Decimal(0)
+        return await self._fetch_bbo(product_id)
 
+    @query_retry(max_attempts=15, min_wait=0.2, max_wait=1, reraise=True)
     async def _fetch_bbo(self, product_id: Any) -> Tuple[Decimal, Decimal]:
         """Fetch best bid/ask via get_market_liquidity."""
-        try:
-            liquidity = await self._rest_client.get_market_liquidity(product_id=product_id)
-        except Exception as exc:
-            # Log richer context so we know why BBO is missing
-            self.logger.log(
-                f"[ethereal] get_market_liquidity failed for {product_id}: "
-                f"{type(exc).__name__}: {exc!r}",
-                "WARNING",
-            )
-            return Decimal(0), Decimal(0)
+        if product_id is None:
+            raise ValueError("product_id is None for BBO fetch")
+        product_id = str(product_id)
+        liquidity = await self._rest_client.get_market_liquidity(product_id=product_id)
 
         bids = getattr(liquidity, "bids", None) or []
         asks = getattr(liquidity, "asks", None) or []
         best_bid = Decimal(str(bids[0][0])) if bids else Decimal(0)
         best_ask = Decimal(str(asks[0][0])) if asks else Decimal(0)
         return best_bid, best_ask
-
-    def _maker_price(self, direction: str, best_bid: Decimal, best_ask: Decimal) -> Decimal:
-        """Choose a maker-friendly price using tick_size to avoid post_only rejection."""
-        tick = self.config.tick_size or Decimal(0)
-        price: Decimal
-        if direction == "buy":
-            # Aim just below best ask; if no ask, fall back to best bid.
-            candidate = best_ask - tick if best_ask > 0 and tick > 0 else best_bid
-            price = candidate if candidate > 0 else best_ask or best_bid
-        else:
-            # Aim just above best bid; if no bid, fall back to best ask.
-            candidate = best_bid + tick if best_bid > 0 and tick > 0 else best_ask
-            price = candidate if candidate > 0 else best_bid or best_ask
-        return self.round_to_tick(price)
 
     async def list_positions(self, subaccount_id: Optional[str] = None) -> List[Any]:
         """
@@ -639,7 +715,7 @@ class EtherealClient(BaseExchangeClient):
 
         product = await self._get_product_by_ticker(ticker)
         if product:
-            self.config.contract_id = getattr(product, "id", ticker.upper())
+            self.config.contract_id = str(getattr(product, "id", ticker.upper()))
             tick_size_val = getattr(product, "tick_size", None)
             self.config.tick_size = Decimal(str(tick_size_val)) if tick_size_val else Decimal(0)
         else:

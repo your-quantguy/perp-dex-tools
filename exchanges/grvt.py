@@ -284,7 +284,7 @@ class GrvtClient(BaseExchangeClient):
                 order_status = order_info.status
 
         if order_status == 'PENDING':
-            raise Exception('Paradex Server Error: Order not processed after 10 seconds')
+            raise Exception('GRVT Server Error: Order not processed after 10 seconds')
         else:
             return order_info
 
