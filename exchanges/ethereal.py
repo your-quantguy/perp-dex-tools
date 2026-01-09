@@ -599,19 +599,33 @@ class EtherealClient(BaseExchangeClient):
             return Decimal(0), Decimal(0)
         return await self._fetch_bbo(product_id)
 
-    @query_retry(max_attempts=15, min_wait=0.2, max_wait=1, reraise=True)
     async def _fetch_bbo(self, product_id: Any) -> Tuple[Decimal, Decimal]:
-        """Fetch best bid/ask via get_market_liquidity."""
+        """Fetch best bid/ask via get_market_liquidity with manual retries."""
         if product_id is None:
             raise ValueError("product_id is None for BBO fetch")
-        product_id = str(product_id)
-        liquidity = await self._rest_client.get_market_liquidity(product_id=product_id)
 
-        bids = getattr(liquidity, "bids", None) or []
-        asks = getattr(liquidity, "asks", None) or []
-        best_bid = Decimal(str(bids[0][0])) if bids else Decimal(0)
-        best_ask = Decimal(str(asks[0][0])) if asks else Decimal(0)
-        return best_bid, best_ask
+        max_attempts = 15
+        wait = 0.2
+        for attempt in range(max_attempts):
+            try:
+                liquidity = await self._rest_client.get_market_liquidity(product_id=str(product_id))
+
+                bids = getattr(liquidity, "bids", None) or []
+                asks = getattr(liquidity, "asks", None) or []
+                best_bid = Decimal(str(bids[0][0])) if bids else Decimal(0)
+                best_ask = Decimal(str(asks[0][0])) if asks else Decimal(0)
+                return best_bid, best_ask
+            except Exception as exc:
+                self.logger.log(
+                    f"[ethereal] get_market_liquidity failed for {product_id} "
+                    f"(attempt {attempt + 1}/{max_attempts}): {type(exc).__name__}: {exc}",
+                    "WARNING",
+                )
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(wait)
+                    wait = min(1.0, wait * 2)
+                    continue
+                return Decimal(0), Decimal(0)
 
     async def list_positions(self, subaccount_id: Optional[str] = None) -> List[Any]:
         """
@@ -645,7 +659,135 @@ class EtherealClient(BaseExchangeClient):
         self.logger.log("No position endpoint available on Ethereal client", "ERROR")
         return []
 
-    
+    async def get_positions_metrics(self, tickers: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        """
+        Fetch positions and normalize key metrics for monitoring.
+
+        Returns a list of dicts with: symbol, side, size, entry_price, mark_price,
+        liquidation_price, margin_ratio, maintenance_margin, unrealized_pnl, notional.
+        """
+        positions = await self.list_positions()
+        tickers_upper = [t.upper() for t in tickers or []]
+
+        def safe_dec(val: Any) -> Optional[Decimal]:
+            try:
+                if val is None:
+                    return None
+                return Decimal(str(val))
+            except Exception:
+                return None
+
+        metrics: List[Dict[str, Any]] = []
+        for pos in positions:
+            product_id = (
+                pos.get("product_id")
+                if isinstance(pos, dict)
+                else getattr(pos, "product_id", None)
+            ) or (
+                pos.get("productId")
+                if isinstance(pos, dict)
+                else getattr(pos, "productId", None)
+            )
+
+            symbol = None
+            if tickers_upper:
+                try:
+                    symbol = await self.get_ticker_by_product_id(product_id)
+                except Exception:
+                    symbol = None
+            if not symbol:
+                symbol = await self.get_ticker_by_product_id(product_id)
+            if not symbol:
+                symbol = str(product_id) if product_id is not None else "UNKNOWN"
+
+            size = safe_dec(
+                pos.get("size") if isinstance(pos, dict) else getattr(pos, "size", None)
+            ) or Decimal(0)
+
+            # Skip zero/flat positions
+            if size == 0:
+                continue
+
+            entry_price = safe_dec(
+                pos.get("entry_price") if isinstance(pos, dict) else getattr(pos, "entry_price", None)
+            ) or safe_dec(
+                pos.get("avgEntryPrice") if isinstance(pos, dict) else getattr(pos, "avgEntryPrice", None)
+            )
+            mark_price = safe_dec(
+                pos.get("mark_price") if isinstance(pos, dict) else getattr(pos, "mark_price", None)
+            ) or safe_dec(
+                pos.get("markPrice") if isinstance(pos, dict) else getattr(pos, "markPrice", None)
+            )
+            liquidation_price = safe_dec(
+                pos.get("liquidation_price") if isinstance(pos, dict) else getattr(pos, "liquidation_price", None)
+            ) or safe_dec(
+                pos.get("liquidationPrice") if isinstance(pos, dict) else getattr(pos, "liquidationPrice", None)
+            )
+            maintenance_margin = safe_dec(
+                pos.get("maintenance_margin") if isinstance(pos, dict) else getattr(pos, "maintenance_margin", None)
+            ) or safe_dec(
+                pos.get("maintenanceMargin") if isinstance(pos, dict) else getattr(pos, "maintenanceMargin", None)
+            )
+            margin_ratio = safe_dec(
+                pos.get("margin_ratio") if isinstance(pos, dict) else getattr(pos, "margin_ratio", None)
+            ) or safe_dec(
+                pos.get("marginRatio") if isinstance(pos, dict) else getattr(pos, "marginRatio", None)
+            )
+            unrealized_pnl = safe_dec(
+                pos.get("unrealized_pnl") if isinstance(pos, dict) else getattr(pos, "unrealized_pnl", None)
+            ) or safe_dec(
+                pos.get("unrealizedPnl") if isinstance(pos, dict) else getattr(pos, "unrealizedPnl", None)
+            )
+
+            # Notional estimate: prefer mark_price * size, fallback to cost
+            notional = None
+            if mark_price is not None:
+                notional = abs(size * mark_price)
+            elif isinstance(pos, dict) and "cost" in pos:
+                notional = safe_dec(pos.get("cost"))
+            else:
+                notional = safe_dec(getattr(pos, "cost", None))
+
+            raw_side = (
+                pos.get("side") if isinstance(pos, dict) else getattr(pos, "side", None)
+            )
+            side = ""
+            if raw_side is not None:
+                s = str(raw_side).lower()
+                if s in ("buy", "long", "1", "side.buy"):
+                    side = "long"
+                elif s in ("sell", "short", "-1", "side.sell"):
+                    side = "short"
+            if not side:
+                if size > 0:
+                    side = "long"
+                elif size < 0:
+                    side = "short"
+                else:
+                    side = "flat"
+
+            metric = {
+                "symbol": symbol,
+                "side": side,
+                "size": size,
+                "entry_price": entry_price,
+                "mark_price": mark_price,
+                "liquidation_price": liquidation_price,
+                "maintenance_margin": maintenance_margin,
+                "margin_ratio": margin_ratio,
+                "unrealized_pnl": unrealized_pnl,
+                "notional": notional,
+            }
+
+            if tickers_upper:
+                sym_up = (symbol or "").upper()
+                if not any(t in sym_up for t in tickers_upper):
+                    continue
+
+            metrics.append(metric)
+
+        return metrics
+
     def _extract_positions(self, resp: Any) -> List[Any]:
         """Normalize common Ethereal SDK response shapes to a list."""
         if resp is None:
