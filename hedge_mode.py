@@ -16,6 +16,7 @@ Supported exchanges:
       Use --v2 flag to use hedge_mode_grvt_v2.py instead
     - edgex: Uses HedgeBot from hedge_mode_edgex.py (edgeX + Lighter)
     - nado: Uses HedgeBot from hedge_mode_nado.py (Nado + Lighter)
+    - standx: Uses HedgeBot from hedge_mode_standx.py (StandX + Lighter)
 
 Cross-platform compatibility:
     - Works on Linux, macOS, and Windows
@@ -43,6 +44,7 @@ Examples:
     python hedge_mode.py --exchange grvt --v2 --ticker BTC --size 0.05 --iter 10 --max-position 0.1
     python hedge_mode.py --exchange edgex --ticker BTC --size 0.001 --iter 20
     python hedge_mode.py --exchange nado --ticker BTC --size 0.003 --iter 20 --max-position 0.05
+    python hedge_mode.py --exchange standx --ticker BTC --size 0.003 --iter 20 --max-position 0.05
         """
     )
     
@@ -70,7 +72,7 @@ Examples:
 
 def validate_exchange(exchange):
     """Validate that the exchange is supported."""
-    supported_exchanges = ['backpack', 'extended', 'apex', 'grvt', 'edgex', 'nado']
+    supported_exchanges = ['backpack', 'extended', 'apex', 'grvt', 'edgex', 'nado', 'standx']
     if exchange.lower() not in supported_exchanges:
         print(f"Error: Unsupported exchange '{exchange}'")
         print(f"Supported exchanges: {', '.join(supported_exchanges)}")
@@ -100,6 +102,9 @@ def get_hedge_bot_class(exchange, v2=False):
             return HedgeBot
         elif exchange.lower() == 'nado':
             from hedge.hedge_mode_nado import HedgeBot
+            return HedgeBot
+        elif exchange.lower() == 'standx':
+            from hedge.hedge_mode_standx import HedgeBot
             return HedgeBot
         else:
             raise ValueError(f"Unsupported exchange: {exchange}")
@@ -147,7 +152,7 @@ async def main():
                 fill_timeout=args.fill_timeout,
                 max_position=args.max_position
             )
-        elif args.exchange in ['backpack', 'edgex', 'nado', 'grvt']:
+        elif args.exchange in ['backpack', 'edgex', 'nado', 'grvt', 'standx']:
             bot = HedgeBotClass(
                 ticker=args.ticker.upper(),
                 order_quantity=Decimal(args.size),

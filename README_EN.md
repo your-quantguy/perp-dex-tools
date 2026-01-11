@@ -29,14 +29,16 @@ You will get 10% taker fee discount rebates and potential future benefits
 You will get 30% fee rebates and points boost
 
 #### grvt: [https://grvt.io/exchange/sign-up?ref=QUANT](https://grvt.io/exchange/sign-up?ref=QUANT)
+
 You will get 1.3x points boost; rebates (auto rebates system is expected to be launched in mid-Oct); access to private trading competition
 
 #### Extended: [https://app.extended.exchange/join/QUANT](https://app.extended.exchange/join/QUANT)
+
 10% fee discount; points boost (black box, but "you will get more points from affiliate referral program than using another account to refer yourself" quoted from the official documentation from Extended); access to private trading competition
 
-#### ApeX: [https://join.omni.apex.exchange/quant]( https://join.omni.apex.exchange/quant)
-30% fee rebates; 5% fee discount; points boost
+#### ApeX: [https://join.omni.apex.exchange/quant](https://join.omni.apex.exchange/quant)
 
+30% fee rebates; 5% fee discount; points boost
 
 ## Installation
 

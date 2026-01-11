@@ -37,10 +37,12 @@
 获得 1.3x 全网最高的积分加成，未来的手续费返佣（官方预计 10 月中上线），以及即将开始的专属交易竞赛
 
 #### Extended: [https://app.extended.exchange/join/QUANT](https://app.extended.exchange/join/QUANT)
+
 10%的即时手续费减免；积分加成（官方未公布具体加成公式，但文档里有明确说明，通过官方大使邀请能拿到比自己小号邀请自己更多的分数）
 
-#### ApeX: [https://join.omni.apex.exchange/quant]( https://join.omni.apex.exchange/quant)
-30%返佣; 5%手续费减免; 积分加成; 有资格参与10月20日至11月2日的社区专属交易竞赛，总奖金高达$5500
+#### ApeX: [https://join.omni.apex.exchange/quant](https://join.omni.apex.exchange/quant)
+
+30%返佣; 5%手续费减免; 积分加成; 有资格参与 10 月 20 日至 11 月 2 日的社区专属交易竞赛，总奖金高达$5500
 
 ## 安装
 
@@ -329,7 +331,7 @@ python hedge_mode.py --exchange edgex --ticker BTC --size 0.001 --iter 20
 - `--iter`: 交易循环次数
 - `--fill-timeout`: maker 订单填充超时时间（秒，默认 5）
 - `--sleep`: 每一笔交易之后的暂停时间，增加持仓时间（秒，默认 0）
-- `--max-position`: 当设置了这个参数后，对冲模式会在对冲的同时逐渐建仓到设置的最大仓位，单位是币本位，比如在跑btc时设置0.1，就是指逐渐建仓到0.1btc，并逐渐建仓。达到这个最大仓位后，会逐渐建仓，以此循环。
+- `--max-position`: 当设置了这个参数后，对冲模式会在对冲的同时逐渐建仓到设置的最大仓位，单位是币本位，比如在跑 btc 时设置 0.1，就是指逐渐建仓到 0.1btc，并逐渐建仓。达到这个最大仓位后，会逐渐建仓，以此循环。
 
 ## 配置
 
@@ -381,9 +383,9 @@ python hedge_mode.py --exchange edgex --ticker BTC --size 0.001 --iter 20
 #### Extended 配置
 
 - `EXTENDED_API_KEY`: Extended API Key
-- `EXTENDED_STARK_KEY_PUBLIC`: 创建API后显示的 Stark 公钥
-- `EXTENDED_STARK_KEY_PRIVATE`: 创建API后显示的 Stark 私钥
-- `EXTENDED_VAULT`: 创建API后显示的 Extended Vault ID
+- `EXTENDED_STARK_KEY_PUBLIC`: 创建 API 后显示的 Stark 公钥
+- `EXTENDED_STARK_KEY_PRIVATE`: 创建 API 后显示的 Stark 私钥
+- `EXTENDED_VAULT`: 创建 API 后显示的 Extended Vault ID
 
 #### Apex 配置
 
