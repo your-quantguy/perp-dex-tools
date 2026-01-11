@@ -173,12 +173,14 @@ class StandXWebSocketManager:
 
     def __init__(self, symbol: str, token: str, session_id: str,
                  depth_callback: Optional[Callable] = None,
-                 order_callback: Optional[Callable] = None):
+                 order_callback: Optional[Callable] = None,
+                 price_callback: Optional[Callable] = None):
         self.symbol = symbol
         self.token = token
         self.session_id = session_id
         self.depth_callback = depth_callback
         self.order_callback = order_callback
+        self.price_callback = price_callback
         self.ws_url = "wss://perps.standx.com/ws-stream/v1"
         self.websocket = None
         self.running = False
@@ -187,6 +189,9 @@ class StandXWebSocketManager:
         # Cache for BBO prices
         self.best_bid: Decimal = Decimal('0')
         self.best_ask: Decimal = Decimal('0')
+
+        # Cache for mark price
+        self.mark_price: Decimal = Decimal('0')
 
     async def connect(self):
         """Connect to StandX WebSocket and subscribe to channels."""
@@ -216,8 +221,17 @@ class StandXWebSocketManager:
                     }
                     await ws.send(json.dumps(depth_msg))
 
+                    # Subscribe to price channel for mark price
+                    price_msg = {
+                        "subscribe": {
+                            "channel": "price",
+                            "symbol": self.symbol
+                        }
+                    }
+                    await ws.send(json.dumps(price_msg))
+
                     if self.logger:
-                        self.logger.log(f"Subscribed to depth_book and order channels for {self.symbol}", "INFO")
+                        self.logger.log(f"Subscribed to depth_book, price, and order channels for {self.symbol}", "INFO")
 
                     # Listen for messages
                     await self._listen(ws)
@@ -255,6 +269,8 @@ class StandXWebSocketManager:
 
         if channel == 'depth_book':
             await self._handle_depth_book(data.get('data', {}))
+        elif channel == 'price':
+            await self._handle_price(data.get('data', {}))
         elif channel == 'order':
             await self._handle_order_update(data.get('data', {}))
         elif channel == 'auth':
@@ -278,6 +294,15 @@ class StandXWebSocketManager:
 
         if self.depth_callback:
             await self.depth_callback(self.best_bid, self.best_ask)
+
+    async def _handle_price(self, data: Dict[str, Any]):
+        """Handle price channel updates for mark price."""
+        mark_price_str = data.get('mark_price', '')
+        if mark_price_str:
+            self.mark_price = Decimal(mark_price_str)
+
+        if self.price_callback:
+            await self.price_callback(self.mark_price)
 
     async def _handle_order_update(self, data: Dict[str, Any]):
         """Handle order update messages."""
@@ -473,6 +498,19 @@ class StandXClient(BaseExchangeClient):
         best_ask = Decimal(asks[0][0]) if asks else Decimal('0')
 
         return best_bid, best_ask
+
+    @query_retry(default_return=Decimal('0'))
+    async def fetch_mark_price(self, contract_id: str) -> Decimal:
+        """Get mark price from WebSocket cache or HTTP fallback."""
+        # Try WebSocket cache first
+        if self.ws_manager and self.ws_manager.mark_price > 0:
+            return self.ws_manager.mark_price
+
+        # Fallback to HTTP - use query_symbol_price endpoint
+        result = await self._make_request("GET", "/api/query_symbol_price",
+                                          params={"symbol": contract_id})
+        mark_price = Decimal(result.get('mark_price', '0'))
+        return mark_price
 
     async def get_order_price(self, direction: str) -> Decimal:
         """Get the price for placing an order."""

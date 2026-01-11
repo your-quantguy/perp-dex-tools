@@ -433,6 +433,14 @@ class HedgeBot:
         best_bid, best_ask = await self.standx_client.fetch_bbo_prices(self.standx_contract_id)
         return best_bid, best_ask
 
+    async def fetch_standx_mark_price(self) -> Decimal:
+        """Fetch mark price from StandX."""
+        if not self.standx_client:
+            raise Exception("StandX client not initialized")
+
+        mark_price = await self.standx_client.fetch_mark_price(self.standx_contract_id)
+        return mark_price
+
     def round_to_tick(self, price: Decimal) -> Decimal:
         """Round price to tick size."""
         if self.standx_tick_size is None:
@@ -441,27 +449,28 @@ class HedgeBot:
 
     async def place_standx_post_only_order(self, side: str, quantity: Decimal) -> Tuple[Decimal, Decimal]:
         """
-        Place a post-only order on StandX with 9 USD offset from BBO.
+        Place a post-only order on StandX with 9 bps offset from mark price.
         Uses query_open_orders to track order status since new_order only returns request_id.
         """
         if not self.standx_client:
             raise Exception("StandX client not initialized")
 
         self.standx_order_status = None
-        self.logger.info(f"[StandX] [{side}] Placing POST-ONLY order with 9 bps offset")
+        self.logger.info(f"[StandX] [{side}] Placing POST-ONLY order with 9 bps offset from mark price")
 
-        # Get BBO prices
+        # Get mark price and BBO prices
+        mark_price = await self.fetch_standx_mark_price()
         best_bid, best_ask = await self.fetch_standx_bbo_prices()
 
-        # Calculate price with 9 bps offset
+        # Calculate price with 9 bps offset from mark price
         if side.lower() == 'buy':
-            order_price = best_ask * (Decimal('1') - self.STANDX_OFFSET_BPS)
+            order_price = mark_price * (Decimal('1') - self.STANDX_OFFSET_BPS)
         else:
-            order_price = best_bid * (Decimal('1') + self.STANDX_OFFSET_BPS)
+            order_price = mark_price * (Decimal('1') + self.STANDX_OFFSET_BPS)
 
         order_price = self.round_to_tick(order_price)
 
-        self.logger.info(f"[StandX] [{side}] BBO: {best_bid}/{best_ask}, Order price: {order_price}")
+        self.logger.info(f"[StandX] [{side}] Mark: {mark_price}, BBO: {best_bid}/{best_ask}, Order price: {order_price}")
 
         # Get open orders before placing new order
         open_orders_before = await self.standx_client.get_active_orders(self.standx_contract_id)
@@ -539,12 +548,12 @@ class HedgeBot:
                     return Decimal(0), Decimal(0)
 
             elif time.time() - start_time > self.fill_timeout:
-                # Check if price has moved
-                new_best_bid, new_best_ask = await self.fetch_standx_bbo_prices()
+                # Check if price has moved - use mark price for comparison
+                new_mark_price = await self.fetch_standx_mark_price()
                 if side.lower() == 'buy':
-                    current_price = new_best_ask * (Decimal('1') - self.STANDX_OFFSET_BPS)
+                    current_price = new_mark_price * (Decimal('1') - self.STANDX_OFFSET_BPS)
                 else:
-                    current_price = new_best_bid * (Decimal('1') + self.STANDX_OFFSET_BPS)
+                    current_price = new_mark_price * (Decimal('1') + self.STANDX_OFFSET_BPS)
 
                 current_price = self.round_to_tick(current_price)
 
