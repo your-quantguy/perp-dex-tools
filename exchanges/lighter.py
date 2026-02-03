@@ -33,10 +33,17 @@ class LighterClient(BaseExchangeClient):
     def __init__(self, config: Dict[str, Any]):
         """Initialize Lighter client."""
         super().__init__(config)
-
+        self.logger = TradingLogger(exchange="lighter", ticker=self.config.ticker, log_to_console=False)
+        
         # Lighter credentials from environment
         self.api_key_private_key = os.getenv('API_KEY_PRIVATE_KEY')
         self.account_index = int(os.getenv('LIGHTER_ACCOUNT_INDEX', '0'))
+        # 如果没有提供 Lighter account index，通过钱包地址查找主账户
+        if self.account_index == 0:
+            self.account_address = os.getenv('LIGHTER_ADDRESS', '')
+            if not self.account_address:
+                raise ValueError("LIGHTER_ADDRESS is not set in environment variables.")
+            self.account_index = self._get_lihgter_account_index(self.account_address)
         self.api_key_index = int(os.getenv('LIGHTER_API_KEY_INDEX', '0'))
         self.base_url = "https://mainnet.zklighter.elliot.ai"
 
@@ -44,7 +51,6 @@ class LighterClient(BaseExchangeClient):
             raise ValueError("API_KEY_PRIVATE_KEY must be set in environment variables")
 
         # Initialize logger
-        self.logger = TradingLogger(exchange="lighter", ticker=self.config.ticker, log_to_console=False)
         self._order_update_handler = None
 
         # Initialize Lighter client (will be done in connect)
@@ -59,13 +65,45 @@ class LighterClient(BaseExchangeClient):
         self.orders_cache = {}
         self.current_order_client_id = None
         self.current_order = None
+    
+    def _get_lihgter_account_index(self, address):
+        from eth_utils import to_checksum_address
+        import requests
+                
+        # 转换为 EIP-55 校验格式
+        checksum_address = to_checksum_address(address.lower())
+        url = 'https://mainnet.zklighter.elliot.ai/api/v1/account?by=l1_address&value='
+        full_url = url + checksum_address
 
+        res = requests.get(full_url)
+        data = res.json()
+
+        # 提取 account_index
+        if 'accounts' in data:
+            account_index = data['accounts'][0]['account_index']
+            self.logger.log(f"Lighter Account Index: {account_index}")
+            return int(account_index)
+        else:
+            self.logger.log(f"Account not found by {address}.")
+    
     def _validate_config(self) -> None:
         """Validate Lighter configuration."""
-        required_env_vars = ['API_KEY_PRIVATE_KEY', 'LIGHTER_ACCOUNT_INDEX', 'LIGHTER_API_KEY_INDEX']
-        missing_vars = [var for var in required_env_vars if not os.getenv(var)]
-        if missing_vars:
-            raise ValueError(f"Missing required environment variables: {missing_vars}")
+        required_vars = ['API_KEY_PRIVATE_KEY']
+        missing_required = [var for var in required_vars if not os.getenv(var)]
+        
+        if missing_required:
+            raise ValueError(f"Missing required environment variables: {missing_required}")
+
+        # 检查 LIGHTER_ACCOUNT_INDEX 或 LIGHTER_ADDRESS 至少有一个
+        has_index = os.getenv('LIGHTER_ACCOUNT_INDEX')
+        has_address = os.getenv('LIGHTER_ADDRESS')
+        if not (has_index or has_address):
+            raise ValueError("Either LIGHTER_ACCOUNT_INDEX or LIGHTER_ADDRESS must be set in environment variables.")
+
+        # 检查 API Key Index（如果没有则使用默认值并提示）
+        if not os.getenv('LIGHTER_API_KEY_INDEX'):
+            self.logger.log("Warning: LIGHTER_API_KEY_INDEX not set, defaulting to 0.")
+
 
     async def _get_market_config(self, ticker: str) -> Tuple[int, int, int]:
         """Get market configuration for a ticker using official SDK."""

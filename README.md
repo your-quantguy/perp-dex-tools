@@ -409,7 +409,9 @@ python hedge_mode.py --exchange edgex --ticker BTC --size 0.001 --iter 20
 
 2. 在浏览器中打开这个网址
 
-3. 在结果中搜索 "account_index" - 如果你有子账户，会有多个 account_index，短的那个是你主账户的，长的是你的子账户。
+3. 如果你只有主账户，直接将钱包地址填入 LIGHTER_ADDRESS 环境变量，无需查找 account_index。
+
+4. 如果你需要使用子账户，请在返回的结果中查找 account_index。主账户的 account_index 通常较短，而子账户的 account_index 较长。手动查找并填写对应的 account_index。
 
 ### 命令行参数
 
