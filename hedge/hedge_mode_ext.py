@@ -147,6 +147,9 @@ class HedgeBot:
         self.extended_vault = os.getenv('EXTENDED_VAULT')
         self.extended_stark_key_private = os.getenv('EXTENDED_STARK_KEY_PRIVATE')
         self.extended_stark_key_public = os.getenv('EXTENDED_STARK_KEY_PUBLIC')
+
+        # Load ticker mapping configuration
+        self._load_ticker_mapping()
         self.extended_api_key = os.getenv('EXTENDED_API_KEY')
 
     def shutdown(self, signum=None, frame=None):
@@ -178,6 +181,52 @@ class HedgeBot:
                 self.logger.removeHandler(handler)
             except Exception:
                 pass
+
+    def _load_ticker_mapping(self):
+        """Load ticker mapping configuration from environment variables."""
+        # Default fallback mapping for common currency pairs
+        default_mapping = {
+            "extended_to_lighter": {
+                "EUR": "EURUSD",
+                "GBP": "GBPUSD",
+                "JPY": "JPYUSD",
+                "AUD": "AUDUSD"
+            }
+        }
+
+        try:
+            # Try to load from environment variable
+            ticker_mapping_str = os.getenv('TICKER_MAPPING')
+
+            if ticker_mapping_str:
+                self.ticker_mapping = json.loads(ticker_mapping_str)
+                self.logger.info(f"✅ Loaded ticker mapping from .env: {self.ticker_mapping}")
+            else:
+                self.ticker_mapping = default_mapping
+                self.logger.info(f"⚠️ TICKER_MAPPING not found in .env, using default mapping: {default_mapping}")
+
+        except json.JSONDecodeError as e:
+            self.ticker_mapping = default_mapping
+            self.logger.error(f"⚠️ Error parsing TICKER_MAPPING JSON: {e}, using default mapping: {default_mapping}")
+        except Exception as e:
+            self.ticker_mapping = default_mapping
+            self.logger.error(f"⚠️ Unexpected error loading ticker mapping: {e}, using default mapping: {default_mapping}")
+
+    def get_lighter_ticker(self):
+        """Get the corresponding Lighter ticker for the current ticker."""
+        mapping_key = "extended_to_lighter"
+
+        # Check if mapping exists for this exchange combination
+        if mapping_key in self.ticker_mapping:
+            exchange_mapping = self.ticker_mapping[mapping_key]
+            if self.ticker in exchange_mapping:
+                lighter_ticker = exchange_mapping[self.ticker]
+                self.logger.info(f"🔄 Ticker mapping: Extended '{self.ticker}' → Lighter '{lighter_ticker}'")
+                return lighter_ticker
+
+        # If no mapping found, use original ticker and log warning
+        self.logger.warning(f"⚠️ No ticker mapping found for Extended '{self.ticker}' to Lighter, using original ticker")
+        return self.ticker
 
     def _initialize_csv_file(self):
         """Initialize CSV file with headers if it doesn't exist."""
@@ -547,6 +596,9 @@ class HedgeBot:
         url = f"{self.lighter_base_url}/api/v1/orderBooks"
         headers = {"accept": "application/json"}
 
+        # Get the mapped ticker for Lighter
+        lighter_ticker = self.get_lighter_ticker()
+
         try:
             response = requests.get(url, headers=headers, timeout=10)
             response.raise_for_status()
@@ -560,15 +612,16 @@ class HedgeBot:
                 raise Exception("Unexpected response format")
 
             for market in data["order_books"]:
-                if market["symbol"] == self.ticker:
+                if market["symbol"] == lighter_ticker:
                     price_multiplier = pow(10, market["supported_price_decimals"])
-                    return (market["market_id"], 
-                           pow(10, market["supported_size_decimals"]), 
+                    self.logger.info(f"✅ Found Lighter market config for {lighter_ticker}: market_id={market['market_id']}")
+                    return (market["market_id"],
+                           pow(10, market["supported_size_decimals"]),
                            price_multiplier,
                            Decimal("1") / (Decimal("10") ** market["supported_price_decimals"])
                            )
 
-            raise Exception(f"Ticker {self.ticker} not found")
+            raise Exception(f"Ticker {lighter_ticker} not found")
 
         except Exception as e:
             self.logger.error(f"⚠️ Error getting market config: {e}")

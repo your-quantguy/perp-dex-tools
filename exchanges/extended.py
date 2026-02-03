@@ -13,7 +13,7 @@ from .base import BaseExchangeClient, OrderResult, OrderInfo, query_retry
 from helpers.logger import TradingLogger
 
 from x10.perpetual.trading_client import PerpetualTradingClient
-from x10.perpetual.configuration import STARKNET_MAINNET_CONFIG
+from x10.perpetual.configuration import MAINNET_CONFIG as STARKNET_MAINNET_CONFIG
 from x10.perpetual.accounts import StarkPerpetualAccount
 from x10.perpetual.orders import TimeInForce, OrderSide
 
