@@ -6,21 +6,20 @@ import os
 import sys
 import time
 import requests
-import argparse
 import traceback
 import csv
 from decimal import Decimal
 from typing import Tuple
 
 from lighter.signer_client import SignerClient
-import sys
-import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from exchanges.backpack import BackpackClient
 import websockets
 from datetime import datetime
 import pytz
+from helpers.lighter_ws import build_lighter_ws_url, lighter_ws_connect_kwargs
+
 
 class Config:
     """Simple config class to wrap dictionary for Backpack client."""
@@ -43,7 +42,7 @@ class HedgeBot:
         if max_position == Decimal('0'):
             self.max_position = order_quantity
         else:
-            self.max_position = max_position        
+            self.max_position = max_position
 
         # Initialize logging to file
         os.makedirs("logs", exist_ok=True)
@@ -214,7 +213,7 @@ class HedgeBot:
                 order_data["side"] = "LONG"
                 order_type = "CLOSE"
                 self.lighter_position += Decimal(order_data["filled_base_amount"])
-            
+
             client_order_index = order_data["client_order_id"]
 
             self.logger.info(f"[{client_order_index}] [{order_type}] [Lighter] [FILLED]: "
@@ -342,7 +341,7 @@ class HedgeBot:
 
     async def handle_lighter_ws(self):
         """Handle Lighter WebSocket connection and messages."""
-        url = "wss://mainnet.zklighter.elliot.ai/stream"
+        url = build_lighter_ws_url()
         cleanup_counter = 0
 
         while not self.stop_flag:
@@ -351,7 +350,7 @@ class HedgeBot:
                 # Reset order book state before connecting
                 await self.reset_lighter_order_book()
 
-                async with websockets.connect(url) as ws:
+                async with websockets.connect(url, **lighter_ws_connect_kwargs()) as ws:
                     # Subscribe to order book updates
                     await ws.send(json.dumps({"type": "subscribe", "channel": f"order_book/{self.lighter_market_index}"}))
 
@@ -477,8 +476,11 @@ class HedgeBot:
 
                         except asyncio.TimeoutError:
                             timeout_count += 1
-                            if timeout_count % 3 == 0:
-                                self.logger.warning(f"⏰ No message from Lighter websocket for {timeout_count} seconds")
+                            if timeout_count % 120 == 0:
+                                self.logger.warning(
+                                    f"⏰ No message from Lighter websocket for {timeout_count} seconds "
+                                    f"(can be normal on quiet markets)"
+                                )
                             continue
                         except websockets.exceptions.ConnectionClosed as e:
                             self.logger.warning(f"⚠️ Lighter websocket connection closed: {e}")
@@ -565,11 +567,11 @@ class HedgeBot:
             for market in data["order_books"]:
                 if market["symbol"] == self.ticker:
                     price_multiplier = pow(10, market["supported_price_decimals"])
-                    return (market["market_id"], 
-                           pow(10, market["supported_size_decimals"]), 
-                           price_multiplier,
-                           Decimal("1") / (Decimal("10") ** market["supported_price_decimals"])
-                           )
+                    return (market["market_id"],
+                            pow(10, market["supported_size_decimals"]),
+                            price_multiplier,
+                            Decimal("1") / (Decimal("10") ** market["supported_price_decimals"])
+                            )
             raise Exception(f"Ticker {self.ticker} not found")
 
         except Exception as e:
@@ -748,7 +750,6 @@ class HedgeBot:
 
         self.waiting_for_lighter_fill = True
 
-
     async def place_lighter_market_order(self, lighter_side: str, quantity: Decimal, price: Decimal):
         if not self.lighter_client:
             await self.initialize_lighter_client()
@@ -764,7 +765,6 @@ class HedgeBot:
             order_type = "OPEN"
             is_ask = True
             price = best_bid[0] * Decimal('0.998')
-
 
         # Reset order state
         self.lighter_order_filled = False
@@ -873,7 +873,7 @@ class HedgeBot:
                     order_type = "OPEN"
                 else:
                     order_type = "CLOSE"
-                
+
                 if status == 'CANCELED' and filled_size > 0:
                     status = 'FILLED'
 
@@ -1107,7 +1107,9 @@ class HedgeBot:
             while self.backpack_position < self.max_position and not self.stop_flag:
                 self.lighter_position = self.get_lighter_position()
                 self.backpack_position = await self.get_backpack_position()
-                self.logger.info(f"Buying up to {self.max_position} | Backpack position: {self.backpack_position} | Lighter position: {self.lighter_position}")
+                self.logger.info(
+                    f"Buying up to {self.max_position} | Backpack position: {self.backpack_position} |"
+                    f" Lighter position: {self.lighter_position}")
                 if abs(self.backpack_position + self.lighter_position) > self.order_quantity*2:
                     self.logger.error(f"❌ Position diff is too large: {self.backpack_position + self.lighter_position}")
                     sys.exit(1)
@@ -1150,13 +1152,15 @@ class HedgeBot:
             while self.backpack_position > -1*self.max_position and not self.stop_flag:
                 self.lighter_position = self.get_lighter_position()
                 self.backpack_position = await self.get_backpack_position()
-                self.logger.info(f"Selling up to -{self.max_position} | Backpack position: {self.backpack_position} | Lighter position: {self.lighter_position}")
+                self.logger.info(
+                    f"Selling up to -{self.max_position} | Backpack position: {self.backpack_position} |"
+                    f" Lighter position: {self.lighter_position}")
                 if abs(self.backpack_position + self.lighter_position) > self.order_quantity*2:
                     self.logger.error(f"❌ Position diff is too large: {self.backpack_position + self.lighter_position}")
                     sys.exit(1)
 
                 if iterations == self.iterations:
-                    if self.backpack_position>0 and self.backpack_position <= self.order_quantity:
+                    if self.backpack_position > 0 and self.backpack_position <= self.order_quantity:
                         exit_after_next_trade = True
 
                 self.order_execution_complete = False
@@ -1187,7 +1191,7 @@ class HedgeBot:
                     if time.time() - start_time > 180:
                         self.logger.error("❌ Timeout waiting for trade completion")
                         break
-                
+
                 if exit_after_next_trade:
                     self.logger.info("Position back to zero. Done! Exiting...")
                     break

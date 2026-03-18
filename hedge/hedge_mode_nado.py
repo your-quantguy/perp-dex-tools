@@ -21,6 +21,7 @@ from exchanges.nado import NadoClient
 import websockets
 from datetime import datetime
 import pytz
+from helpers.lighter_ws import build_lighter_ws_url, lighter_ws_connect_kwargs
 
 class Config:
     """Simple config class to wrap dictionary for Nado client."""
@@ -337,7 +338,7 @@ class HedgeBot:
 
     async def handle_lighter_ws(self):
         """Handle Lighter WebSocket connection and messages."""
-        url = "wss://mainnet.zklighter.elliot.ai/stream"
+        url = build_lighter_ws_url()
         cleanup_counter = 0
 
         while not self.stop_flag:
@@ -346,7 +347,7 @@ class HedgeBot:
                 # Reset order book state before connecting
                 await self.reset_lighter_order_book()
 
-                async with websockets.connect(url) as ws:
+                async with websockets.connect(url, **lighter_ws_connect_kwargs()) as ws:
                     # Subscribe to order book updates
                     await ws.send(json.dumps({"type": "subscribe", "channel": f"order_book/{self.lighter_market_index}"}))
 
@@ -472,8 +473,11 @@ class HedgeBot:
 
                         except asyncio.TimeoutError:
                             timeout_count += 1
-                            if timeout_count % 3 == 0:
-                                self.logger.warning(f"⏰ No message from Lighter websocket for {timeout_count} seconds")
+                            if timeout_count % 120 == 0:
+                                self.logger.warning(
+                                    f"⏰ No message from Lighter websocket for {timeout_count} seconds "
+                                    f"(can be normal on quiet markets)"
+                                )
                             continue
                         except websockets.exceptions.ConnectionClosed as e:
                             self.logger.warning(f"⚠️ Lighter websocket connection closed: {e}")

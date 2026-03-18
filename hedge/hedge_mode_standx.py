@@ -20,6 +20,7 @@ import websockets
 from datetime import datetime
 import pytz
 from dotenv import load_dotenv
+from helpers.lighter_ws import build_lighter_ws_url, lighter_ws_connect_kwargs
 
 load_dotenv()
 
@@ -252,14 +253,14 @@ class HedgeBot:
 
     async def handle_lighter_ws(self):
         """Handle Lighter WebSocket connection and messages."""
-        url = "wss://mainnet.zklighter.elliot.ai/stream"
+        url = build_lighter_ws_url()
 
         while not self.stop_flag:
             timeout_count = 0
             try:
                 await self.reset_lighter_order_book()
 
-                async with websockets.connect(url) as ws:
+                async with websockets.connect(url, **lighter_ws_connect_kwargs()) as ws:
                     # Subscribe to order book updates
                     await ws.send(json.dumps({"type": "subscribe", "channel": f"order_book/{self.lighter_market_index}"}))
 

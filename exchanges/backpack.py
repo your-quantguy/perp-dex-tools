@@ -13,7 +13,7 @@ from typing import Dict, Any, List, Optional, Tuple
 from cryptography.hazmat.primitives.asymmetric import ed25519
 import websockets
 from bpx.public import Public
-from .bp_client import Account
+from .bp_client import Account, KeepAliveHttpClient
 from bpx.constants.enums import OrderTypeEnum, TimeInForceEnum
 
 from .base import BaseExchangeClient, OrderResult, OrderInfo, query_retry
@@ -163,11 +163,14 @@ class BackpackClient(BaseExchangeClient):
         if not self.public_key or not self.secret_key:
             raise ValueError("BACKPACK_PUBLIC_KEY and BACKPACK_SECRET_KEY must be set in environment variables")
 
-        # Initialize Backpack clients using official SDK
+        # Initialize Backpack clients using official SDK.
+        # Use KeepAliveHttpClient so all API calls reuse the same TCP connection (lower latency).
+        self._http_client = KeepAliveHttpClient(timeout=15)
         self.public_client = Public()
         self.account_client = Account(
             public_key=self.public_key,
-            secret_key=self.secret_key
+            secret_key=self.secret_key,
+            default_http_client=self._http_client,
         )
 
         self._order_update_handler = None
@@ -390,15 +393,27 @@ class BackpackClient(BaseExchangeClient):
         else:
             raise Exception(f"[OPEN] Invalid direction: {direction}")
 
-        result = self.account_client.execute_order(
+        # Run sync SDK call in thread pool to avoid blocking the event loop and reduce latency
+        result = await asyncio.to_thread(
+            self.account_client.execute_order,
             symbol=contract_id,
             side=side,
             order_type=OrderTypeEnum.MARKET,
-            quantity=str(quantity)
+            quantity=str(quantity),
         )
 
+        if not isinstance(result, dict):
+            error_msg = str(result) if result else "Unknown error"
+            self.logger.log(f"Market order API returned non-dict: {error_msg}", "ERROR")
+            raise Exception(f"Backpack API error: {error_msg}")
+
+        if '_raw_error' in result:
+            error_msg = result.get('_raw_error', 'Unknown error')
+            self.logger.log(f"Market order API error (non-JSON response): {error_msg}", "ERROR")
+            raise Exception(f"Backpack API error: {error_msg}")
+
         order_id = result.get('id')
-        order_status = result.get('status').upper()
+        order_status = result.get('status', '').upper()
 
         if order_status != 'FILLED':
             self.logger.log(f"Market order failed with status: {order_status}", "ERROR")

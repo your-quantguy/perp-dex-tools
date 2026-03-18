@@ -1,7 +1,69 @@
+import requests
 from bpx.base.base_account import BaseAccount
 from bpx.http_client.sync_http_client import SyncHttpClient
 from typing import Optional, Union, Dict, Any, List
 from bpx.constants.enums import *
+
+
+class KeepAliveHttpClient:
+    """
+    HTTP client that uses a persistent requests.Session() for connection keep-alive.
+    Reusing the same TCP connection reduces latency for repeated API calls (e.g. order placement).
+    Drop-in compatible with SyncHttpClient for get/post/patch/delete.
+    """
+    def __init__(self, timeout: int = 30):
+        self._session = requests.Session()
+        self._timeout = timeout
+        self.proxies: Optional[dict] = None
+
+    def _request(self, method: str, url: str, **kwargs) -> Union[Dict[str, Any], List[Any], str]:
+        kwargs.setdefault("timeout", self._timeout)
+        if self.proxies is not None:
+            kwargs["proxies"] = self.proxies
+        resp = self._session.request(method, url, **kwargs)
+        if not resp.content:
+            return {}
+        try:
+            return resp.json()
+        except Exception:
+            # API returned non-JSON (e.g. error page); return dict so callers get .get() instead of str
+            return {"_raw_error": resp.text, "statusCode": resp.status_code}
+
+    def get(
+        self,
+        url: str,
+        headers: Optional[dict] = None,
+        params: Optional[dict] = None,
+    ) -> Union[Dict[str, Any], List[Any], str]:
+        return self._request("GET", url, headers=headers, params=params)
+
+    def post(
+        self,
+        url: str,
+        headers: Optional[dict] = None,
+        data: Optional[dict] = None,
+    ) -> Union[Dict[str, Any], List[Any], str]:
+        # Backpack API expects JSON body for execute_order and other mutations
+        body = data if data is not None else {}
+        return self._request("POST", url, headers=headers, json=body)
+
+    def patch(
+        self,
+        url: str,
+        headers: Optional[dict] = None,
+        data: Optional[dict] = None,
+    ) -> Union[Dict[str, Any], List[Any], str]:
+        body = data if data is not None else {}
+        return self._request("PATCH", url, headers=headers, json=body)
+
+    def delete(
+        self,
+        url: str,
+        headers: Optional[dict] = None,
+        data: Optional[dict] = None,
+    ) -> Union[Dict[str, Any], List[Any], str]:
+        body = data if data is not None else {}
+        return self._request("DELETE", url, headers=headers, json=body)
 
 
 http_client = SyncHttpClient()
