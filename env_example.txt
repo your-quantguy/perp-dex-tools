@@ -81,6 +81,13 @@ LOG_FILE=trading_log.csv
 
 TIMEZONE=Asia/Shanghai
 
+# Ticker映射配置 (对冲模式专用)
+# 用于解决不同交易所使用不同ticker名称的问题
+# 格式: {"源交易所_to_目标交易所": {"源ticker": "目标ticker"}}
+# 例子: Extended使用"EUR"，Lighter使用"EURUSD"
+# 注意: lighter上交易EUR要使用Isolated保证金模式，请先手动切换
+TICKER_MAPPING={"extended_to_lighter": {"EUR":"EURUSD","GBP":"GBPUSD","JPY":"JPYUSD","AUD":"AUDUSD"}, "backpack_to_lighter": {"EUR":"EURUSD"}, "grvt_to_lighter": {"EUR":"EURUSD"}}
+
 # EdgeX API Endpoints
 EDGEX_BASE_URL=https://pro.edgex.exchange
 EDGEX_WS_URL=wss://quote.edgex.exchange
