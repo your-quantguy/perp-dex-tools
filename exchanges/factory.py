@@ -2,8 +2,8 @@
 Exchange factory for creating exchange clients dynamically.
 """
 
-from typing import Dict, Any, Type
-from .base import BaseExchangeClient
+from typing import Type
+from .base import BaseExchangeClient, ExchangeConfig
 
 
 class ExchangeFactory:
@@ -16,12 +16,12 @@ class ExchangeFactory:
     }
 
     @classmethod
-    def create_exchange(cls, exchange_name: str, config: Dict[str, Any]) -> BaseExchangeClient:
+    def create_exchange(cls, exchange_name: str, config: ExchangeConfig) -> BaseExchangeClient:
         """Create an exchange client instance.
 
         Args:
             exchange_name: Name of the exchange (e.g., 'bulk')
-            config: Configuration dictionary for the exchange
+            config: Configuration object for the exchange
 
         Returns:
             Exchange client instance

@@ -194,5 +194,4 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-# pyenv settings
-.python-version
+# Keep the project's .python-version file in version control.

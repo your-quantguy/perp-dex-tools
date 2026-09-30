@@ -1,5 +1,3 @@
-import os
-import ssl
 import requests
 from typing import Dict, Any, Optional
 

@@ -9,10 +9,12 @@ import time
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
+from typing import Protocol, cast
 
 import dotenv
 
 from exchanges import ExchangeFactory
+from exchanges.base import BaseExchangeClient, OrderInfo, OrderResult
 from helpers import TradingLogger
 from helpers.lark_bot import LarkBot
 from helpers.telegram_bot import TelegramBot
@@ -20,6 +22,22 @@ from trading_bot import TradingConfig
 
 
 TERMINAL = {"FILLED", "CANCELED", "REJECTED"}
+
+
+class LighterHedgeClient(Protocol):
+    base_amount_multiplier: Decimal
+
+    def setup_order_update_handler(self, handler) -> None: ...
+    async def get_contract_attributes(self) -> tuple[str, Decimal]: ...
+    async def connect(self) -> None: ...
+    async def disconnect(self) -> None: ...
+    async def fetch_bbo_prices(self, contract_id: str) -> tuple[Decimal, Decimal]: ...
+    async def get_active_orders(self, contract_id: str) -> list[OrderInfo]: ...
+    async def get_account_positions(self) -> Decimal: ...
+    async def place_hedge_market_order(
+        self, quantity: Decimal, side: str, max_slippage_percent: Decimal,
+        reduce_only: bool = False,
+    ) -> OrderResult: ...
 
 
 @dataclass
@@ -63,8 +81,12 @@ class HedgeBot:
             max_orders=1, wait_time=0, exchange="lighter",
             grid_step=Decimal(-100), stop_price=Decimal(-1), pause_price=Decimal(-1),
         )
-        self.maker = maker_client or ExchangeFactory.create_exchange(config.exchange, self.maker_config)
-        self.lighter = lighter_client or ExchangeFactory.create_exchange("lighter", self.lighter_config)
+        self.maker: BaseExchangeClient = maker_client or ExchangeFactory.create_exchange(
+            config.exchange, self.maker_config,
+        )
+        self.lighter = cast(LighterHedgeClient, lighter_client or ExchangeFactory.create_exchange(
+            "lighter", self.lighter_config,
+        ))
         maker_network = getattr(self.maker, "signature_domain", None) or getattr(self.maker, "network", "mainnet")
         if maker_network != "mainnet":
             raise ValueError("Lighter hedge mode requires the maker exchange on mainnet too")
@@ -83,7 +105,7 @@ class HedgeBot:
                     bot.send_text(message)
             await asyncio.to_thread(send)
 
-    async def _positions(self):
+    async def _positions(self) -> Decimal:
         maker = await self.maker.get_account_positions()
         lighter = await self.lighter.get_account_positions()
         if maker + lighter != 0:

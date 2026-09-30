@@ -317,7 +317,7 @@ class TradingBot:
     async def _get_monitored_open_price(self, order_id):
         try:
             return await self.exchange_client.get_order_price(self.config.direction), None
-        except (ConnectionError, TimeoutError) as exc:
+        except (ConnectionError, TimeoutError):
             if self.config.exchange != "arcus":
                 raise
             return await self._recover_arcus_open_order(order_id)

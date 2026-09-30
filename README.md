@@ -6,19 +6,17 @@
 
 ## 安装
 
-使用 Python 3.12：
+使用 Python 3.12 和 [uv](https://docs.astral.sh/uv/)；`uv.lock` 固定了已解析的依赖版本：
 
 ```bash
-python3.12 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
+uv sync --locked
 ```
 
 复制 [env_example.txt](env_example.txt) 为 `.env`，只填写要运行的交易所凭据。也可用 `--env-file` 指向仓库外的配置文件。已有的 shell 环境变量优先于 env 文件中的值，切换账户前应清理旧变量。
 
 ```bash
-python runbot.py --help
-python runbot.py --exchange bulk --ticker ETH --direction buy --quantity 0.1 --take-profit 0.02 --max-orders 40 --wait-time 450
+uv run --locked python runbot.py --help
+uv run --locked python runbot.py --exchange bulk --ticker ETH --direction buy --quantity 0.1 --take-profit 0.02 --max-orders 40 --wait-time 450
 ```
 
 `--exchange` 必须明确指定为 `bulk`、`arcus` 或 `lighter`。`--take-profit 0.02` 表示 **0.02%** 的价格变化，并非 0.02 USDT 或扣除费用后的净利润。`--quantity` 是合约标的数量；交易所的最小数量、步长和名义金额限制仍适用。
@@ -43,7 +41,7 @@ python runbot.py --exchange bulk --ticker ETH --direction buy --quantity 0.1 --t
 设置 `API_KEY_PRIVATE_KEY`、`LIGHTER_ACCOUNT_INDEX` 和 `LIGHTER_API_KEY_INDEX`。当前适配连接 Lighter 主网。示例：
 
 ```bash
-python runbot.py --exchange lighter --ticker ETH --direction buy --quantity 0.1 --take-profit 0.02 --max-orders 40 --wait-time 450
+uv run --locked python runbot.py --exchange lighter --ticker ETH --direction buy --quantity 0.1 --take-profit 0.02 --max-orders 40 --wait-time 450
 ```
 
 ## 对冲模式
@@ -53,8 +51,8 @@ python runbot.py --exchange lighter --ticker ETH --direction buy --quantity 0.1 
 Lighter 目前只连接主网，因此对冲模式要求 Bulk 或 Arcus **同样使用主网**。启动时要求两个账户在该市场无仓位、无活动订单。请分别配置两家的凭据，并先确认市场、额度、费用与 Lighter 保证金足以执行反向单。
 
 ```bash
-python hedge_mode.py --exchange bulk --ticker ETH --size 0.1 --iter 2
-python hedge_mode.py --exchange arcus --ticker ETH --size 0.1 --iter 2 --max-position 0.5
+uv run --locked python hedge_mode.py --exchange bulk --ticker ETH --size 0.1 --iter 2
+uv run --locked python hedge_mode.py --exchange arcus --ticker ETH --size 0.1 --iter 2 --max-position 0.5
 ```
 
 `--size` 是每笔 maker 订单的标的数量；`--iter` 是循环次数。默认 `--max-position 0` 时，每轮从零仓位买入并对冲，再卖出回零。设置正值后，maker 仓位逐笔累积到 `+max-position`，再逐笔反向到 `-max-position`；最后一轮结束后回到零，两腿始终保持反向。`max-position` 必须是 `size` 的整数倍。`--max-slippage` 默认限制 Lighter 单笔市价对冲的价格偏离为 0.5%；`--target-timeout` 默认允许每个目标仓位最多等待 600 秒。程序退出时不会自动撤销未确认订单或强制平仓，需人工核对两个账户。
@@ -71,3 +69,13 @@ python hedge_mode.py --exchange arcus --ticker ETH --size 0.1 --iter 2 --max-pos
 策略没有止损。价格长期朝不利方向移动时，仓位和风险可能持续累积。手续费、资金费和滑点也可能高于设定的止盈价差。首次使用先在测试环境验证订单、撤单和仓位核对；退出或断线后要检查交易所上的真实订单和仓位。
 
 Telegram 通知仍然保留：配置 `TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_CHAT_ID`，详见 [Telegram 指南](docs/telegram-bot-setup.md)。日志写入 `logs/`。
+
+## 开发检查
+
+```bash
+uv run --locked pytest -q
+uv run --locked ruff check .
+uv run --locked pyright
+```
+
+现有测试可由 pytest 直接运行。Pyright 目前检查交易所基础接口和对冲入口，后续重构时逐步扩展覆盖范围。Ruff 格式化可用于新改动的文件；现有代码尚未整体格式化。

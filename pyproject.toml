@@ -1,0 +1,46 @@
+[project]
+name = "perp-dex-tools"
+version = "0.1.0"
+description = "Bulk, Arcus, and Lighter perpetual trading bots"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "python-dotenv>=1,<2",
+    "pytz>=2025.2",
+    "aiohttp>=3.10,<4",
+    "websockets>=12",
+    "cryptography>=41,<47",
+    "requests>=2.32.5,<3",
+    "certifi",
+    "tenacity>=9.1.2,<10",
+    "lighter-sdk==1.0.4",
+    "bulk-keychain==0.1.27",
+    "base58==2.1.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pyright",
+    "ruff",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 129
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[tool.pyright]
+include = ["exchanges/base.py", "hedge_mode.py"]
+pythonVersion = "3.12"
+typeCheckingMode = "basic"
+venvPath = "."
+venv = ".venv"

@@ -5,7 +5,6 @@ Based on the sample code provided by the user.
 
 import asyncio
 import json
-import time
 from typing import Dict, Any, List, Optional, Tuple, Callable
 import websockets
 import os

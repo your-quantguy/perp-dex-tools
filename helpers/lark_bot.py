@@ -52,7 +52,7 @@ class LarkBot:
                     print(f"Lark send message failed: {response_data}")
                 return response_data
         except Exception as e:
-            print(f"Lark send message failed: {e}");
+            print(f"Lark send message failed: {e}")
             return {"code": -1, "error": str(e)}
 
 # example

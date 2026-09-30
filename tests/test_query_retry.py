@@ -4,7 +4,6 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 import asyncio
 from unittest.mock import AsyncMock, patch
-from tenacity import RetryCallState, stop_after_attempt, wait_exponential
 from exchanges.base import query_retry
 
 

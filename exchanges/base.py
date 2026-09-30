@@ -4,10 +4,16 @@ All exchange implementations should inherit from this class.
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict, Any, List, Optional, Tuple, Type, Union
+from typing import Any, List, Optional, Protocol, Tuple, Type, Union
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
 from tenacity import RetryCallState, retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+
+
+class ExchangeConfig(Protocol):
+    """Configuration fields shared by exchange clients."""
+
+    tick_size: Decimal
 
 
 def query_retry(
@@ -19,8 +25,10 @@ def query_retry(
     reraise: bool = False
 ):
     def retry_error_callback(retry_state: RetryCallState):
-        print(f"Operation: [{retry_state.fn.__name__}] failed after {retry_state.attempt_number} retries, "
-              f"exception: {str(retry_state.outcome.exception())}")
+        operation = getattr(retry_state.fn, "__name__", "unknown")
+        error = retry_state.outcome.exception() if retry_state.outcome else None
+        print(f"Operation: [{operation}] failed after {retry_state.attempt_number} retries, "
+              f"exception: {error}")
         return default_return
 
     return retry(
@@ -53,15 +61,15 @@ class OrderInfo:
     size: Decimal
     price: Decimal
     status: str
-    filled_size: Decimal = 0.0
-    remaining_size: Decimal = 0.0
+    filled_size: Decimal = Decimal(0)
+    remaining_size: Decimal = Decimal(0)
     cancel_reason: str = ''
 
 
 class BaseExchangeClient(ABC):
     """Base class for all exchange clients."""
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: ExchangeConfig):
         """Initialize the exchange client with configuration."""
         self.config = config
         self._validate_config()
@@ -116,6 +124,16 @@ class BaseExchangeClient(ABC):
     @abstractmethod
     async def get_account_positions(self) -> Decimal:
         """Get account positions."""
+        pass
+
+    @abstractmethod
+    async def get_contract_attributes(self) -> Tuple[str, Decimal]:
+        """Get the configured market identifier and price tick."""
+        pass
+
+    @abstractmethod
+    async def fetch_bbo_prices(self, contract_id: str) -> Tuple[Decimal, Decimal]:
+        """Get the best bid and ask."""
         pass
 
     @abstractmethod
