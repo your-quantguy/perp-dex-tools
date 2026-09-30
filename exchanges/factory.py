@@ -10,17 +10,7 @@ class ExchangeFactory:
     """Factory class for creating exchange clients."""
 
     _registered_exchanges = {
-        'edgex': 'exchanges.edgex.EdgeXClient',
-        'backpack': 'exchanges.backpack.BackpackClient',
-        'paradex': 'exchanges.paradex.ParadexClient',
-        'aster': 'exchanges.aster.AsterClient',
         'lighter': 'exchanges.lighter.LighterClient',
-        'grvt': 'exchanges.grvt.GrvtClient',
-        'extended': 'exchanges.extended.ExtendedClient',
-        'apex': 'exchanges.apex.ApexClient',
-        'nado': 'exchanges.nado.NadoClient',
-        'ethereal': 'exchanges.ethereal.EtherealClient',
-        'standx': 'exchanges.standx.StandXClient',
         'bulk': 'exchanges.bulk.BulkClient',
         'arcus': 'exchanges.arcus.ArcusClient',
     }
@@ -30,7 +20,7 @@ class ExchangeFactory:
         """Create an exchange client instance.
 
         Args:
-            exchange_name: Name of the exchange (e.g., 'edgex')
+            exchange_name: Name of the exchange (e.g., 'bulk')
             config: Configuration dictionary for the exchange
 
         Returns:
@@ -55,7 +45,7 @@ class ExchangeFactory:
         """Dynamically import an exchange class.
 
         Args:
-            class_path: Full module path to the exchange class (e.g., 'exchanges.edgex.EdgeXClient')
+            class_path: Full module path to the exchange class (e.g., 'exchanges.bulk.BulkClient')
 
         Returns:
             The exchange class

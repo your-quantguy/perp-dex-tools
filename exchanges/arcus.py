@@ -45,8 +45,6 @@ class ArcusClient(BaseExchangeClient):
             raise ValueError("ARCUS_ACCOUNT_INDEX must be an integer from 0 to 9") from None
         if not 0 <= index <= 9:
             raise ValueError("ARCUS_ACCOUNT_INDEX must be an integer from 0 to 9")
-        if self.config.boost_mode:
-            raise ValueError("Arcus supports maker single-exchange mode only")
 
     def __init__(self, config):
         super().__init__(config)

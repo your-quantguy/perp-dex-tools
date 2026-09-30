@@ -1,5 +1,0 @@
-# Same signer used by the working Bulk strategy. PyPI bulk-client 0.1.2
-# signs without the mainnet domain byte and is rejected with "bad signature".
-bulk-keychain==0.1.27
-# Validate target account public keys before any requests (also used by tests).
-base58==2.1.1

@@ -1,16 +1,16 @@
 # Arcus 单交易所接入
 
-支持 Arcus **永续合约**，不支持 Spot RFQ、跨交易所对冲或 `--boost`。原有开仓、对应止盈、冷却和仓位差额检查不变。开仓与止盈均为 `LIMIT + ALO`（只做 maker），止盈为 `reduceOnly`。
+支持 Arcus **永续合约**。开仓与止盈均为 `LIMIT + ALO`（只做 maker），止盈为 `reduceOnly`。
 
-## 独立环境
+## 环境
 
-推荐 homelab 使用 Python 3.12；仅运行 Arcus 不必安装其他交易所 SDK：
+使用 Python 3.12 和项目统一依赖：
 
 ```bash
 cd ~/perp-dex-tools
-python3.12 -m venv .venv-arcus
-source .venv-arcus/bin/activate
-python -m pip install -r arcus_requirements.txt
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 python runbot.py --help
 python scripts/arcus_probe.py --network testnet --ticker ETH
 ```

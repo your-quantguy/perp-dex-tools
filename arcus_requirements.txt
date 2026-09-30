@@ -1,7 +1,0 @@
-# Standalone Arcus single-exchange runtime; no other exchange SDKs required.
-aiohttp>=3.10,<4
-cryptography>=41,<47
-python-dotenv>=1,<2
-tenacity>=9.1.2,<10
-pytz>=2025.2
-requests>=2.32.5,<3

@@ -6,7 +6,7 @@ import os
 import asyncio
 import time
 import logging
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from typing import Dict, Any, List, Optional, Tuple
 
 from .base import BaseExchangeClient, OrderResult, OrderInfo, query_retry
@@ -59,6 +59,7 @@ class LighterClient(BaseExchangeClient):
         self.orders_cache = {}
         self.current_order_client_id = None
         self.current_order = None
+        self._hedge_order_index = int(time.time() * 1000) % 2_000_000_000
 
     def _validate_config(self) -> None:
         """Validate Lighter configuration."""
@@ -123,7 +124,8 @@ class LighterClient(BaseExchangeClient):
         """Connect to Lighter."""
         try:
             # Initialize shared API client
-            self.api_client = ApiClient(configuration=Configuration(host=self.base_url))
+            if self.api_client is None:
+                self.api_client = ApiClient(configuration=Configuration(host=self.base_url))
 
             # Initialize Lighter client
             await self._initialize_lighter_client()
@@ -359,6 +361,51 @@ class LighterClient(BaseExchangeClient):
             )
         else:
             raise Exception(f"[CLOSE] Error placing order: {order_result.error_message}")
+
+    async def place_hedge_market_order(self, quantity: Decimal, side: str,
+                                       max_slippage_percent: Decimal,
+                                       reduce_only: bool = False) -> OrderResult:
+        """Submit one bounded IOC market hedge; the caller must confirm the position change."""
+        if side not in {"buy", "sell"} or quantity <= 0:
+            raise ValueError("Invalid Lighter hedge side or quantity")
+        if not Decimal(0) < max_slippage_percent <= Decimal(5):
+            raise ValueError("Lighter hedge slippage limit must be within (0, 5] percent")
+        base_units = quantity * self.base_amount_multiplier
+        if base_units != base_units.to_integral_value() or base_units <= 0:
+            raise ValueError("Lighter cannot represent the exact hedge quantity")
+        bid, ask = await self.fetch_bbo_prices(self.config.contract_id)
+        if bid <= 0 or ask <= 0 or bid >= ask:
+            raise ConnectionError("Lighter order book is not ready for a hedge")
+        factor = max_slippage_percent / 100
+        if side == "buy":
+            price = ask * (1 + factor)
+            rounding = ROUND_CEILING
+        else:
+            price = bid * (1 - factor)
+            rounding = ROUND_FLOOR
+        price_units = (price * self.price_multiplier).to_integral_value(rounding=rounding)
+        if price_units <= 0:
+            raise ValueError("Invalid Lighter hedge price")
+        self._hedge_order_index = (self._hedge_order_index + 1) % 2_000_000_000
+        order_index = self._hedge_order_index
+        try:
+            _, response, error = await self.lighter_client.create_market_order(
+                market_index=self.config.contract_id,
+                client_order_index=order_index,
+                base_amount=int(base_units),
+                avg_execution_price=int(price_units),
+                is_ask=side == "sell",
+                reduce_only=reduce_only,
+                api_key_index=self.api_key_index,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Lighter hedge submission outcome is unknown for {order_index}") from exc
+        if error is not None:
+            return OrderResult(False, str(order_index), error_message=str(error))
+        if response is None or response.code != 0:
+            return OrderResult(False, str(order_index),
+                               error_message=getattr(response, "message", "Lighter rejected hedge order"))
+        return OrderResult(True, str(order_index), side, quantity, price, "SUBMITTED")
     
     async def get_order_price(self, side: str = '') -> Decimal:
         """Get the price of an order with Lighter using official SDK."""
@@ -508,7 +555,7 @@ class LighterClient(BaseExchangeClient):
         # Find position for current market
         for position in positions:
             if position.market_id == self.config.contract_id:
-                return Decimal(position.position)
+                return Decimal(position.position) * Decimal(position.sign)
 
         return Decimal(0)
 
@@ -518,6 +565,9 @@ class LighterClient(BaseExchangeClient):
         if len(ticker) == 0:
             self.logger.log("Ticker is empty", "ERROR")
             raise ValueError("Ticker is empty")
+
+        if self.api_client is None:
+            self.api_client = ApiClient(configuration=Configuration(host=self.base_url))
 
         order_api = lighter.OrderApi(self.api_client)
         # Get all order books to find the market for our ticker

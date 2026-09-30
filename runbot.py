@@ -19,9 +19,9 @@ def parse_arguments():
     parser = argparse.ArgumentParser(description='Modular Trading Bot - Supports multiple exchanges')
 
     # Exchange selection
-    parser.add_argument('--exchange', type=str, default='edgex',
+    parser.add_argument('--exchange', type=str, required=True,
                         choices=ExchangeFactory.get_supported_exchanges(),
-                        help='Exchange to use (default: edgex). '
+                        help='Exchange to use. '
                              f'Available: {", ".join(ExchangeFactory.get_supported_exchanges())}')
 
     # Trading parameters
@@ -30,7 +30,7 @@ def parse_arguments():
     parser.add_argument('--quantity', type=Decimal, default=Decimal(0.1),
                         help='Order quantity (default: 0.1)')
     parser.add_argument('--take-profit', type=Decimal, default=Decimal(0.02),
-                        help='Take profit in USDT (default: 0.02)')
+                        help='Take profit in percent (default: 0.02%%)')
     parser.add_argument('--direction', type=str, default='buy', choices=['buy', 'sell'],
                         help='Direction of the bot (default: buy)')
     parser.add_argument('--max-orders', type=int, default=40,
@@ -43,13 +43,10 @@ def parse_arguments():
                         help='The minimum distance in percentage to the next close order price (default: -100)')
     parser.add_argument('--stop-price', type=Decimal, default=-1,
                         help='Price to stop trading and exit. Buy: exits if price >= stop-price.'
-                        'Sell: exits if price <= stop-price. (default: -1, no stop)')
+                        ' Sell: exits if price <= stop-price. (default: -1, no stop)')
     parser.add_argument('--pause-price', type=Decimal, default=-1,
                         help='Pause trading and wait. Buy: pause if price >= pause-price.'
-                        'Sell: pause if price <= pause-price. (default: -1, no pause)')
-    parser.add_argument('--boost', action='store_true',
-                        help='Use the Boost mode for volume boosting')
-
+                        ' Sell: pause if price <= pause-price. (default: -1, no pause)')
     return parser.parse_args()
 
 
@@ -90,12 +87,6 @@ async def main():
     # Setup logging first
     setup_logging("WARNING")
 
-    # Validate boost-mode can only be used with aster and backpack exchange
-    if args.boost and args.exchange.lower() != 'aster' and args.exchange.lower() != 'backpack':
-        print(f"Error: --boost can only be used when --exchange is 'aster' or 'backpack'. "
-              f"Current exchange: {args.exchange}")
-        sys.exit(1)
-
     env_path = Path(args.env_file)
     if not env_path.exists():
         print(f"Env file not find: {env_path.resolve()}")
@@ -115,8 +106,7 @@ async def main():
         exchange=args.exchange.lower(),
         grid_step=Decimal(args.grid_step),
         stop_price=Decimal(args.stop_price),
-        pause_price=Decimal(args.pause_price),
-        boost_mode=args.boost
+        pause_price=Decimal(args.pause_price)
     )
 
     # Create and run the bot

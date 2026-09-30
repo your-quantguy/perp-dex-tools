@@ -14,7 +14,7 @@ class BulkBotOrderEventTests(unittest.IsolatedAsyncioTestCase):
         self.bot.config = SimpleNamespace(
             exchange="bulk", contract_id="ETH-USD", direction="buy",
             close_order_side="sell", quantity=Decimal("0.1"),
-            take_profit=Decimal("0.02"), boost_mode=False,
+            take_profit=Decimal("0.02"),
         )
         self.bot.logger = SimpleNamespace(log=lambda *_args: None, log_transaction=lambda *_args: None)
         self.bot.exchange_client = SimpleNamespace(

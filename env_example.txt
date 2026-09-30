@@ -1,115 +1,34 @@
-# used to distinguish log files for multiple accounts, optional
-
+# Optional log filename suffix for multiple accounts
 ACCOUNT_NAME=
 
-# EdgeX Account Credentials (REQUIRED for API access)
-# Find these in your EdgeX account under "API Management"
-EDGEX_ACCOUNT_ID=your_account_id_here
-EDGEX_STARK_PRIVATE_KEY=your_stark_private_key_here
-
-# Backpack Account Credentials (REQUIRED for API access)
-# Find these in your Backpack account under "Portfolio" -> "Settings" -> "API Keys"
-BACKPACK_PUBLIC_KEY=your_api_key
-BACKPACK_SECRET_KEY=your_api_secret
-
-# Paradex Configuration 
-# user icon -> "Wallet" -> "Ethereum Address" and "Copy Paradex Private key"
-PARADEX_L1_ADDRESS=your_generated_l1_address_here
-PARADEX_L2_PRIVATE_KEY=your_generated_l2_private_key_here
-PARADEX_ENVIRONMENT=prod # or testnet
-
-# GRVT Configuration
-# Get these from your GRVT account settings
-GRVT_TRADING_ACCOUNT_ID=your_trading_account_id_here
-GRVT_PRIVATE_KEY=your_private_key_here
-GRVT_API_KEY=your_api_key_here
-GRVT_ENVIRONMENT=prod # or testnet/staging/dev 
-
-# Aster Configuration
-ASTER_API_KEY=your_aster_api_key
-ASTER_SECRET_KEY=your_aster_secret_key
-
-# Lighter Configuration
-API_KEY_PRIVATE_KEY=your_api_key_private_key_here
+# Lighter mainnet
+API_KEY_PRIVATE_KEY=your_lighter_api_private_key
 LIGHTER_ACCOUNT_INDEX=0
 LIGHTER_API_KEY_INDEX=0
 
-# Extended Configuration
-EXTENDED_API_KEY=your_extended_api_key
-EXTENDED_STARK_KEY_PUBLIC=your_stark_public_key
-EXTENDED_STARK_KEY_PRIVATE=your_stark_private_key
-EXTENDED_VAULT=extended_vault_id
-
-# Apex Configuration
-# Generate API_KEY, API_KEY_PASSPHRASE, API_KEY_SECRET by clicking <Generate API> on key management page
-# Generate OMNI_KEY_SEED by clicking <Omni Key> on key management page
-APEX_API_KEY=your_apex_api_key
-APEX_API_KEY_PASSPHRASE=your_apex_api_key_passphrase
-APEX_API_KEY_SECRET=your_apex_api_key_secret
-APEX_OMNI_KEY_SEED=your_apex_omni_key_seed
-
-# Nado Configuration
-# Get your private key from Nado account settings
-NADO_PRIVATE_KEY=your_nado_private_key_here
-NADO_MODE=MAINNET  # or DEVNET
-
-# Ethereal Configuration
-ETHEREAL_BASE_URL=https://api.ethereal.trade
-ETHEREAL_RPC_URL=https://rpc.ethereal.trade
-ETHEREAL_CHAIN_ID=5064014
-ETHEREAL_PRIVATE_KEY=your_private_key # required for signing orders
-ETHEREAL_SUBACCOUNT_ID=your_subaccount_id
-ETHEREAL_ACCOUNT_NAME=primary
-
-# StandX Configuration
-# BSC/Solana wallet address and private key
-STANDX_WALLET_ADDRESS=your_wallet_address_here
-STANDX_PRIVATE_KEY=your_wallet_private_key_here
-STANDX_CHAIN=bsc  # or solana
-
-# Bulk single-exchange trading: choose ONE signing mode.
-# Option A: main wallet signing (existing mode; Base58 private key).
-BULK_PRIVATE_KEY=your_base58_private_key_here
-# BULK_ACCOUNT=your_matching_wallet_public_key_here
-# Option B: authorized agent wallet signing (no main wallet private key).
-# Remove/empty BULK_PRIVATE_KEY above AND unset it in your shell, then set:
-# BULK_AGENT_PRIVATE_KEY=your_agent_base58_private_key_here
-# BULK_ACCOUNT=your_target_main_or_sub_account_public_key_here
-# Register the agent with the target account beforehand using the main wallet.
-# BULK_ACCOUNT is the trading account, NOT the agent wallet address.
-# Defaults are mainnet, where website accounts live:
-# BULK_API_URL=https://mainnet-api1.bulk.trade/api/v1
-# BULK_WS_URL=wss://mainnet-ws1.bulk.trade
-# BULK_SIGNATURE_DOMAIN=mainnet
-# Testnet requires both endpoints together:
+# Bulk: choose ONE signing mode. Mainnet is the default.
+# Owner wallet mode:
+# BULK_PRIVATE_KEY=your_owner_base58_private_key
+# BULK_ACCOUNT=your_matching_owner_public_key
+# Agent wallet mode (authorize agent with owner wallet first):
+# BULK_AGENT_PRIVATE_KEY=your_agent_base58_private_key
+# BULK_ACCOUNT=your_target_trading_account_public_key
+# For testnet, set both endpoints together:
 # BULK_API_URL=https://exchange-api.bulk.trade/api/v1
 # BULK_WS_URL=wss://exchange-ws1.bulk.trade
 # BULK_SIGNATURE_DOMAIN=testnet
 
-# Arcus perpetuals, single-exchange maker mode. Not an Ethereum wallet private key.
-# Generate/authorize an API key in the web app, then copy its API Signing Key.
+# Arcus: authorize an API key for the chosen account/subaccount.
 # ARCUS_API_SIGNING_KEY=your_64_hex_character_api_signing_key
 # ARCUS_ADDRESS=0x_your_master_wallet_address
 # ARCUS_ACCOUNT_INDEX=0
 # ARCUS_NETWORK=testnet
-# Optional public key consistency check (derived automatically if omitted):
-# ARCUS_API_KEY=your_64_hex_character_api_public_key
-# Set ARCUS_NETWORK=mainnet only when you intentionally want real-money trading.
+# ARCUS_API_KEY=optional_64_hex_character_api_public_key
 
-# Notification (optional)
-# guide: https://www.feishu.cn/hc/zh-CN/articles/185289387886-%E6%B6%88%E6%81%AF%E5%8A%A9%E6%89%8B-%E6%9C%BA%E5%99%A8%E4%BA%BA
+# Optional notifications for single-exchange and hedge modes
 LARK_TOKEN=
-
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 
-# Logging
-LOG_TO_CONSOLE=true
-LOG_TO_FILE=true
-LOG_FILE=trading_log.csv
-
+# Log timestamps
 TIMEZONE=Asia/Shanghai
-
-# EdgeX API Endpoints
-EDGEX_BASE_URL=https://pro.edgex.exchange
-EDGEX_WS_URL=wss://quote.edgex.exchange

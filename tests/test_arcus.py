@@ -162,7 +162,7 @@ class ArcusTests(unittest.IsolatedAsyncioTestCase):
         self.env.start()
         self.addCleanup(self.env.stop)
         self.config = SimpleNamespace(ticker="ETH", quantity=Decimal("0.02"),
-                                      tick_size=Decimal("0.01"), direction="buy", boost_mode=False)
+                                      tick_size=Decimal("0.01"), direction="buy")
         self.client = ArcusClient(self.config)
         self.client.market_id = 2
         self.client.tick, self.client.step = Decimal("0.01"), Decimal("0.0000001")
