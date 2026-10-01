@@ -15,7 +15,6 @@ class TelegramBot:
         # Create session with SSL context
         self.session = requests.Session()
         self.session.verify = certifi.where()
-        self.session.timeout = 10
 
     def __enter__(self):
         return self
@@ -42,7 +41,7 @@ class TelegramBot:
         url = f"{self.api_url}/{method}"
         
         try:
-            response = self.session.post(url, json=payload)
+            response = self.session.post(url, json=payload, timeout=10)
             response_data = response.json()
             if not response_data.get("ok", False):
                 print(f"Telegram send message failed: {response_data}")

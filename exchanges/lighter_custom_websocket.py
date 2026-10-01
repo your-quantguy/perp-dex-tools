@@ -15,8 +15,8 @@ from helpers.lighter_ws import build_lighter_ws_url, lighter_ws_connect_kwargs
 class LighterCustomWebSocketManager:
     """Custom WebSocket manager for Lighter order updates and order book without SDK."""
 
-    def __init__(self, config: Dict[str, Any], order_update_callback: Optional[Callable] = None):
-        self.config = config
+    def __init__(self, market_index: int, account_index: int, lighter_client,
+                 order_update_callback: Optional[Callable] = None):
         self.order_update_callback = order_update_callback
         self.logger = None
         self.running = False
@@ -33,9 +33,9 @@ class LighterCustomWebSocketManager:
 
         # WebSocket URL
         self.ws_url = build_lighter_ws_url()
-        self.market_index = config.contract_id
-        self.account_index = config.account_index
-        self.lighter_client = config.lighter_client
+        self.market_index = market_index
+        self.account_index = account_index
+        self.lighter_client = lighter_client
 
     def set_logger(self, logger):
         """Set the logger instance."""
@@ -102,7 +102,7 @@ class LighterCustomWebSocketManager:
             self.order_book_offset = new_offset
             self.order_book_sequence_gap = False
             return True
-        elif new_offset < expected_offset:
+        else:
             # Gap detected - we missed some updates
             self._log(f"Order book sequence gap detected! Expected offset {expected_offset}, got {new_offset}", "WARNING")
             self.order_book_sequence_gap = True

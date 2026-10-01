@@ -2,6 +2,7 @@ import asyncio
 import unittest
 from decimal import Decimal
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock
 
 from exchanges.base import OrderResult
@@ -10,7 +11,8 @@ from trading_bot import TradingBot
 
 class BulkBotOrderEventTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        self.bot = TradingBot.__new__(TradingBot)
+        self.bot: Any = TradingBot.__new__(TradingBot)
+        self.handler: Any = None
         self.bot.config = SimpleNamespace(
             exchange="bulk", contract_id="ETH-USD", direction="buy",
             close_order_side="sell", quantity=Decimal("0.1"),
@@ -74,4 +76,6 @@ class BulkBotOrderEventTests(unittest.IsolatedAsyncioTestCase):
         ))
         opened = OrderResult(True, "entry", "buy", Decimal("0.1"), Decimal("2000"), "OPEN")
         self.assertTrue(await self.bot._handle_order_result(opened))
-        self.assertEqual(self.bot.exchange_client.place_close_order.await_args.args[1], Decimal("0.04"))
+        close_call = self.bot.exchange_client.place_close_order.await_args
+        assert close_call is not None
+        self.assertEqual(close_call.args[1], Decimal("0.04"))

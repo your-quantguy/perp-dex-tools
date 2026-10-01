@@ -4,6 +4,7 @@ import time
 import unittest
 from decimal import Decimal
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 import base58
@@ -19,16 +20,16 @@ class BulkAgentTests(unittest.IsolatedAsyncioTestCase):
         self.agent_key = base58.b58encode(bytes(range(32, 64))).decode()
         self.owner = Signer.from_base58(self.owner_key, "mainnet").pubkey
         self.agent = Signer.from_base58(self.agent_key, "mainnet").pubkey
-        self.config = SimpleNamespace(
+        self.config: Any = SimpleNamespace(
             ticker="ETH", contract_id="ETH-USD", tick_size=Decimal("0.001"),
             quantity=Decimal("0.02"), direction="buy",
         )
 
-    def _client(self, overrides=None):
+    def _client(self, overrides=None) -> Any:
         environment = {"BULK_AGENT_PRIVATE_KEY": self.agent_key, "BULK_ACCOUNT": self.owner}
         environment.update(overrides or {})
         with patch.dict(os.environ, environment, clear=True):
-            return BulkClient(self.config)
+            return cast(Any, BulkClient(self.config))
 
     def _ready(self, client):
         client._ws_task = asyncio.get_running_loop().create_future()
@@ -119,7 +120,7 @@ class BulkAgentTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(signed["signer"], self.agent)
                 self.assertEqual(signed["actions"][0]["l"]["tif"], "ALO")
                 self.assertFalse(signed["actions"][0]["l"]["r"])
-                prepared = prepare_order(action, domain, account=self.owner, signer=self.agent,
+                prepared = cast(Any, prepare_order)(action, domain, account=self.owner, signer=self.agent,
                                          nonce=signed["nonce"])
                 self.assertEqual(signed["signature"], client._signer.sign_bytes(prepared["message_bytes"]))
                 expected_id = compute_order_id_from_order(action, nonce=signed["nonce"], account=self.owner)
@@ -127,7 +128,7 @@ class BulkAgentTests(unittest.IsolatedAsyncioTestCase):
                 agent_account_id = compute_order_id_from_order(action, nonce=signed["nonce"], account=self.agent)
                 self.assertNotEqual(signed["order_id"], agent_account_id)
                 wrong_domain = "testnet" if domain == "mainnet" else "mainnet"
-                wrong_message = prepare_order(action, wrong_domain, account=self.owner, signer=self.agent,
+                wrong_message = cast(Any, prepare_order)(action, wrong_domain, account=self.owner, signer=self.agent,
                                               nonce=signed["nonce"])
                 self.assertNotEqual(signed["signature"], client._signer.sign_bytes(wrong_message["message_bytes"]))
 
@@ -166,7 +167,9 @@ class BulkAgentTests(unittest.IsolatedAsyncioTestCase):
             "orderIdMaker": "entry", "amount": "0.01",
         }], "page": {"hasMore": False}})
         self.assertEqual(await client._filled_size_from_history("entry"), Decimal("0.01"))
-        self.assertEqual(client._request.await_args.kwargs["json"], {"type": "fills", "user": self.owner})
+        request_call = client._request.await_args
+        assert request_call is not None
+        self.assertEqual(request_call.kwargs["json"], {"type": "fills", "user": self.owner})
         client._request.return_value["data"][0]["maker"] = self.agent
         with self.assertRaisesRegex(ValueError, "trading account"):
             await client._filled_size_from_history("entry")
@@ -207,7 +210,9 @@ class BulkAgentTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "Unauthorized"):
             await client.place_open_order("ETH-USD", Decimal("0.02"), "buy")
         client._post_signed.assert_awaited_once()
-        signed = client._post_signed.await_args.args[0]
+        post_call = client._post_signed.await_args
+        assert post_call is not None
+        signed = post_call.args[0]
         self.assertEqual(signed["account"], self.owner)
         self.assertEqual(signed["signer"], self.agent)
 

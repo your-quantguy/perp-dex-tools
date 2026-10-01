@@ -8,19 +8,26 @@ import asyncio
 import traceback
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Optional
+from typing import TYPE_CHECKING, Optional, cast
 
 from exchanges import ExchangeFactory
+from exchanges.base import MarketId
+from exchanges.base import OrderInfo
 from helpers import TradingLogger
 from helpers.lark_bot import LarkBot
 from helpers.telegram_bot import TelegramBot
+
+if TYPE_CHECKING:
+    from exchanges.arcus import ArcusClient
+    from exchanges.bulk import BulkClient
+    from exchanges.lighter import LighterClient
 
 
 @dataclass
 class TradingConfig:
     """Configuration class for trading parameters."""
     ticker: str
-    contract_id: str
+    contract_id: MarketId
     quantity: Decimal
     take_profit: Decimal
     tick_size: Decimal
@@ -44,14 +51,14 @@ class OrderMonitor:
     order_id: Optional[str] = None
     filled: bool = False
     filled_price: Optional[Decimal] = None
-    filled_qty: Decimal = 0.0
+    filled_qty: Decimal = Decimal(0)
 
     def reset(self):
         """Reset the monitor state."""
         self.order_id = None
         self.filled = False
         self.filled_price = None
-        self.filled_qty = 0.0
+        self.filled_qty = Decimal(0)
 
 
 class TradingBot:
@@ -78,6 +85,7 @@ class TradingBot:
         self.current_order_status = None
         self.order_filled_event = asyncio.Event()
         self.order_canceled_event = asyncio.Event()
+        self.order_filled_amount = Decimal(0)
         self.shutdown_requested = False
         self.loop = None
         # Bulk and Arcus share ID-correlated event handling. Retain field names
@@ -101,6 +109,12 @@ class TradingBot:
 
         except Exception as e:
             self.logger.log(f"Error during graceful shutdown: {e}", "ERROR")
+
+    def _lighter_current_order(self) -> OrderInfo:
+        order = cast("LighterClient", self.exchange_client).current_order
+        if order is None:
+            raise RuntimeError("Lighter order state is not available")
+        return order
 
     def _setup_websocket_handlers(self):
         """Setup WebSocket handlers for order updates."""
@@ -170,7 +184,7 @@ class TradingBot:
         self._order_update_handler = order_update_handler
         self.exchange_client.setup_order_update_handler(order_update_handler)
 
-    def _calculate_wait_time(self) -> Decimal:
+    def _calculate_wait_time(self) -> int:
         """Calculate wait time between orders."""
         cool_down_time = self.config.wait_time
 
@@ -206,7 +220,7 @@ class TradingBot:
             # Reset state before placing order
             self.order_filled_event.clear()
             self.current_order_status = 'OPEN'
-            self.order_filled_amount = 0.0
+            self.order_filled_amount = Decimal(0)
             if self.config.exchange in {"bulk", "arcus"}:
                 self._bulk_open_order_id = None
                 self._bulk_waiting_for_open_ack = True
@@ -272,7 +286,7 @@ class TradingBot:
         self.logger.log(f"[OPEN] [{order_id}] Arcus market data unavailable; pausing order changes", "WARNING")
         while not self.shutdown_requested:
             try:
-                order = await self.exchange_client.get_order_for_recovery(order_id)
+                order = await cast("ArcusClient", self.exchange_client).get_order_for_recovery(order_id)
                 if order.filled_size > 0 and not warned_fill:
                     warned_fill = True
                     message = (f"[OPEN] [{order_id}] Filled {order.filled_size} while Arcus market data "
@@ -378,9 +392,11 @@ class TradingBot:
             if recovered_order is not None:
                 current_order_status = recovered_order.status
             elif self.config.exchange == "lighter":
-                current_order_status = self.exchange_client.current_order.status
+                current_order_status = self._lighter_current_order().status
             else:
                 order_info = await self.exchange_client.get_order_info(order_id)
+                if order_info is None:
+                    raise RuntimeError(f"Order {order_id} state is unknown")
                 current_order_status = order_info.status
 
             while (
@@ -390,7 +406,7 @@ class TradingBot:
                 self.logger.log(f"[OPEN] [{order_id}] Waiting for order to be filled @ {order_result.price}", "INFO")
                 await asyncio.sleep(5)
                 if self.config.exchange == "lighter":
-                    current_order_status = self.exchange_client.current_order.status
+                    current_order_status = self._lighter_current_order().status
                 else:
                     order_info = await self.exchange_client.get_order_info(order_id)
                     if order_info is not None:
@@ -405,14 +421,14 @@ class TradingBot:
             if self.config.exchange == "lighter":
                 cancel_result = await self.exchange_client.cancel_order(order_id)
                 start_time = time.time()
-                while (time.time() - start_time < 10 and self.exchange_client.current_order.status != 'CANCELED' and
-                        self.exchange_client.current_order.status != 'FILLED'):
+                while (time.time() - start_time < 10 and self._lighter_current_order().status != 'CANCELED' and
+                        self._lighter_current_order().status != 'FILLED'):
                     await asyncio.sleep(0.1)
 
-                if self.exchange_client.current_order.status not in ['CANCELED', 'FILLED']:
-                    raise Exception(f"[OPEN] Error cancelling order: {self.exchange_client.current_order.status}")
+                if self._lighter_current_order().status not in ['CANCELED', 'FILLED']:
+                    raise Exception(f"[OPEN] Error cancelling order: {self._lighter_current_order().status}")
                 else:
-                    self.order_filled_amount = self.exchange_client.current_order.filled_size
+                    self.order_filled_amount = self._lighter_current_order().filled_size
             else:
                 try:
                     cancel_result = await self.exchange_client.cancel_order(order_id)
@@ -426,6 +442,8 @@ class TradingBot:
                     self.logger.log(f"[CLOSE] Error canceling order {order_id}: {e}", "ERROR")
                     raise
 
+                if cancel_result.filled_size is None:
+                    raise RuntimeError(f"{self.config.exchange} cancel did not confirm the filled size")
                 self.order_filled_amount = cancel_result.filled_size
 
             if self.order_filled_amount > 0:
@@ -538,7 +556,7 @@ class TradingBot:
         else:
             return True
 
-    async def _check_price_condition(self) -> bool:
+    async def _check_price_condition(self) -> tuple[bool, bool]:
         stop_trading = False
         pause_trading = False
 
@@ -595,15 +613,17 @@ class TradingBot:
             self.logger.log(f"Wait Time: {self.config.wait_time}s", "INFO")
             self.logger.log(f"Exchange: {self.config.exchange}", "INFO")
             if self.config.exchange == "bulk":
-                mode = "agent" if self.exchange_client.uses_agent_wallet else "owner"
+                bulk = cast("BulkClient", self.exchange_client)
+                mode = "agent" if bulk.uses_agent_wallet else "owner"
                 self.logger.log(f"Bulk Signing Mode: {mode}", "INFO")
-                self.logger.log(f"Bulk Trading Account: {self.exchange_client.public_key}", "INFO")
-                self.logger.log(f"Bulk Signer: {self.exchange_client.signer_public_key}", "INFO")
+                self.logger.log(f"Bulk Trading Account: {bulk.public_key}", "INFO")
+                self.logger.log(f"Bulk Signer: {bulk.signer_public_key}", "INFO")
             if self.config.exchange == "arcus":
-                self.logger.log(f"Arcus Network: {self.exchange_client.network}", "INFO")
-                self.logger.log(f"Arcus Trading Account: {self.exchange_client.address}", "INFO")
-                self.logger.log(f"Arcus Subaccount: {self.exchange_client.account_index}", "INFO")
-                self.logger.log(f"Arcus API Key: {self.exchange_client.api_key}", "INFO")
+                arcus = cast("ArcusClient", self.exchange_client)
+                self.logger.log(f"Arcus Network: {arcus.network}", "INFO")
+                self.logger.log(f"Arcus Trading Account: {arcus.address}", "INFO")
+                self.logger.log(f"Arcus Subaccount: {arcus.account_index}", "INFO")
+                self.logger.log(f"Arcus API Key: {arcus.api_key}", "INFO")
             self.logger.log(f"Grid Step: {self.config.grid_step}%", "INFO")
             self.logger.log(f"Stop Price: {self.config.stop_price}", "INFO")
             self.logger.log(f"Pause Price: {self.config.pause_price}", "INFO")

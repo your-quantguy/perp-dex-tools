@@ -4,6 +4,7 @@ import time
 import unittest
 from decimal import Decimal
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import aiohttp
@@ -28,11 +29,11 @@ class BulkClientTests(unittest.IsolatedAsyncioTestCase):
         self.environment = patch.dict(os.environ, {"BULK_PRIVATE_KEY": self.key}, clear=True)
         self.environment.start()
         self.addCleanup(self.environment.stop)
-        self.config = type("Config", (), {
+        self.config: Any = type("Config", (), {
             "ticker": "ETH", "contract_id": "", "tick_size": Decimal(0),
             "quantity": Decimal("0.1"), "direction": "buy",
         })()
-        self.client = BulkClient(self.config)
+        self.client: Any = BulkClient(self.config)
 
     def _market_is_connected(self):
         self.client._ws_task = asyncio.get_running_loop().create_future()
@@ -102,6 +103,7 @@ class BulkClientTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.client, "_run_market_socket", socket):
             await self.client.connect()
         self.assertEqual(await self.client.fetch_bbo_prices("ETH-USD"), (Decimal("1999"), Decimal("2000")))
+        assert self.client._ws_task is not None
         self.client._ws_task.cancel()
 
     async def test_market_metadata_validates_lot_and_uses_actual_api_list(self):

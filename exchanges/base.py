@@ -10,10 +10,20 @@ from decimal import Decimal, ROUND_HALF_UP
 from tenacity import RetryCallState, retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 
+MarketId = str | int
+
+
 class ExchangeConfig(Protocol):
     """Configuration fields shared by exchange clients."""
 
+    ticker: str
+    quantity: Decimal
+    direction: str
+    contract_id: MarketId
     tick_size: Decimal
+
+    @property
+    def close_order_side(self) -> str: ...
 
 
 def query_retry(
@@ -97,12 +107,12 @@ class BaseExchangeClient(ABC):
         pass
 
     @abstractmethod
-    async def place_open_order(self, contract_id: str, quantity: Decimal, direction: str) -> OrderResult:
+    async def place_open_order(self, contract_id: MarketId, quantity: Decimal, direction: str) -> OrderResult:
         """Place an open order."""
         pass
 
     @abstractmethod
-    async def place_close_order(self, contract_id: str, quantity: Decimal, price: Decimal, side: str) -> OrderResult:
+    async def place_close_order(self, contract_id: MarketId, quantity: Decimal, price: Decimal, side: str) -> OrderResult:
         """Place a close order."""
         pass
 
@@ -117,7 +127,7 @@ class BaseExchangeClient(ABC):
         pass
 
     @abstractmethod
-    async def get_active_orders(self, contract_id: str) -> List[OrderInfo]:
+    async def get_active_orders(self, contract_id: MarketId) -> List[OrderInfo]:
         """Get active orders for a contract."""
         pass
 
@@ -127,13 +137,18 @@ class BaseExchangeClient(ABC):
         pass
 
     @abstractmethod
-    async def get_contract_attributes(self) -> Tuple[str, Decimal]:
+    async def get_contract_attributes(self) -> Tuple[MarketId, Decimal]:
         """Get the configured market identifier and price tick."""
         pass
 
     @abstractmethod
-    async def fetch_bbo_prices(self, contract_id: str) -> Tuple[Decimal, Decimal]:
+    async def fetch_bbo_prices(self, contract_id: MarketId) -> Tuple[Decimal, Decimal]:
         """Get the best bid and ask."""
+        pass
+
+    @abstractmethod
+    async def get_order_price(self, direction: str) -> Decimal:
+        """Get the next maker price for an order direction."""
         pass
 
     @abstractmethod

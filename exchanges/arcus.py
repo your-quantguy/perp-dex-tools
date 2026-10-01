@@ -117,6 +117,12 @@ class ArcusClient(BaseExchangeClient):
                 if attempt == 2:
                     raise
                 await asyncio.sleep(attempt + 1)
+        raise RuntimeError("Arcus GET retry loop ended without a response")
+
+    def _market_data(self):
+        if self.market is None:
+            raise RuntimeError("Arcus market metadata is not loaded")
+        return self.market
 
     async def get_contract_attributes(self):
         data = await self._get("/markets")
@@ -137,11 +143,12 @@ class ArcusClient(BaseExchangeClient):
     def _check_quantity(self, quantity):
         if not quantity.is_finite() or quantity <= 0 or quantity % self.step:
             raise ValueError(f"Arcus quantity must be positive and a multiple of {self.step}")
-        if quantity > Decimal(self.market["maxOrderSize"]):
-            raise ValueError(f"Arcus maximum order size is {self.market['maxOrderSize']}")
+        market = self._market_data()
+        if quantity > Decimal(market["maxOrderSize"]):
+            raise ValueError(f"Arcus maximum order size is {market['maxOrderSize']}")
 
     def _price_tick(self, price):
-        for tier in self.market.get("tickTiers", []):
+        for tier in self._market_data().get("tickTiers", []):
             if "upToPrice" not in tier or price < Decimal(tier["upToPrice"]):
                 return Decimal(tier["tick"])
         return self.tick
@@ -149,7 +156,7 @@ class ArcusClient(BaseExchangeClient):
     def _snap(self, price, side):
         rounding = ROUND_FLOOR if side == "buy" else ROUND_CEILING
         # Rounding up can cross a tier boundary, which changes the grid again.
-        for _ in range(len(self.market.get("tickTiers", [])) + 2):
+        for _ in range(len(self._market_data().get("tickTiers", [])) + 2):
             tick = self._price_tick(price)
             price = (price / tick).to_integral_value(rounding=rounding) * tick
             if price % self._price_tick(price) == 0:
@@ -394,9 +401,10 @@ class ArcusClient(BaseExchangeClient):
         self._check_quantity(quantity)
         if side not in {"buy", "sell"} or price <= 0 or not price.is_finite():
             raise ValueError("Arcus order side/price is invalid")
-        if not reduce_only and (quantity < Decimal(self.market["minOrderSize"])
-                                or quantity * price < Decimal(self.market["minOrderNotional"])):
-            raise ValueError(f"Arcus minimum opening notional is {self.market['minOrderNotional']} USD")
+        market = self._market_data()
+        if not reduce_only and (quantity < Decimal(market["minOrderSize"])
+                                or quantity * price < Decimal(market["minOrderNotional"])):
+            raise ValueError(f"Arcus minimum opening notional is {market['minOrderNotional']} USD")
         cid = "pdt-" + uuid.uuid4().hex
         self._clients.add(cid)
         ts = self._timestamp()

@@ -2,6 +2,7 @@ import os
 import unittest
 from decimal import Decimal
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 from exchanges.base import OrderInfo, OrderResult
@@ -11,6 +12,7 @@ from hedge_mode import HedgeBot, HedgeConfig
 
 class FakeMaker:
     def __init__(self):
+        self.network = "mainnet"
         self.position = Decimal(0)
         self.orders = []
         self.cancels = []
@@ -144,10 +146,10 @@ class HedgeModeTests(unittest.IsolatedAsyncioTestCase):
         maker.cancel_order = AsyncMock(return_value=OrderResult(
             True, "partial", filled_size=Decimal("0.04")))
         async def order_info(_order_id):
-            status = "CANCELED" if maker.cancel_order.await_count else "OPEN"
+            status = "CANCELED" if cast(AsyncMock, maker.cancel_order).await_count else "OPEN"
             return OrderInfo("partial", "buy", Decimal("0.1"), Decimal(100), status,
                              filled_size=Decimal("0.04"), remaining_size=Decimal("0.06"))
-        maker.get_order_info = order_info
+        cast(Any, maker).get_order_info = order_info
         bot.config.fill_timeout = 0.001
         filled = await bot._execute_maker_order("buy", Decimal("0.1"), Decimal(0), False)
         self.assertEqual(filled, Decimal("0.04"))
@@ -175,7 +177,7 @@ class HedgeModeTests(unittest.IsolatedAsyncioTestCase):
 
 class LighterHedgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_market_metadata_initializes_api_client_before_connect(self):
-        client = LighterClient.__new__(LighterClient)
+        client = cast(Any, LighterClient.__new__(LighterClient))
         client.config = SimpleNamespace(ticker="ETH")
         client.api_client = None
         client.base_url = "https://example.invalid"
@@ -184,7 +186,7 @@ class LighterHedgeTests(unittest.IsolatedAsyncioTestCase):
                                  supported_size_decimals=3, supported_price_decimals=2)
         details = SimpleNamespace(price_decimals=2)
         with patch("exchanges.lighter.ApiClient", return_value=object()) as api_client:
-            with patch("exchanges.lighter.lighter.OrderApi") as order_api:
+            with patch("exchanges.lighter.OrderApi") as order_api:
                 order_api.return_value.order_books = AsyncMock(return_value=SimpleNamespace(
                     order_books=[market]))
                 order_api.return_value.order_book_details = AsyncMock(return_value=SimpleNamespace(
@@ -195,7 +197,7 @@ class LighterHedgeTests(unittest.IsolatedAsyncioTestCase):
         api_client.assert_called_once()
 
     async def test_market_hedge_uses_ioc_and_slippage_bound(self):
-        client = LighterClient.__new__(LighterClient)
+        client = cast(Any, LighterClient.__new__(LighterClient))
         client.config = SimpleNamespace(contract_id=1)
         client.base_amount_multiplier = 1000
         client.price_multiplier = 100
@@ -214,7 +216,7 @@ class LighterHedgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(args["reduce_only"])
 
     async def test_position_sign_is_preserved(self):
-        client = LighterClient.__new__(LighterClient)
+        client = cast(Any, LighterClient.__new__(LighterClient))
         client.config = SimpleNamespace(contract_id=1)
         client._fetch_positions_with_retry = AsyncMock(return_value=[
             SimpleNamespace(market_id=1, position="0.1", sign=-1),

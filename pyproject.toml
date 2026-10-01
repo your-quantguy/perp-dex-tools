@@ -39,7 +39,7 @@ line-length = 129
 select = ["E4", "E7", "E9", "F"]
 
 [tool.pyright]
-include = ["exchanges/base.py", "hedge_mode.py"]
+include = ["."]
 pythonVersion = "3.12"
 typeCheckingMode = "basic"
 venvPath = "."

@@ -11,11 +11,14 @@ import logging
 import os
 import time
 from decimal import Decimal
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, cast
 
 import aiohttp
 import base58
 from bulk_keychain import Signer, prepare_order
+
+if TYPE_CHECKING:
+    from bulk_keychain import OrderItemType, SignatureDomain
 
 from .base import BaseExchangeClient, OrderInfo, OrderResult
 
@@ -34,7 +37,7 @@ class BulkClient(BaseExchangeClient):
         self.symbol = f"{config.ticker.upper()}-USD"
         self.api_url = os.getenv("BULK_API_URL", self.API_URL).rstrip("/")
         self.ws_url = os.getenv("BULK_WS_URL", self.WS_URL)
-        self.signature_domain = self.resolve_signature_domain(self.api_url, self.ws_url)
+        self.signature_domain: "SignatureDomain" = self.resolve_signature_domain(self.api_url, self.ws_url)
         agent_key = os.getenv("BULK_AGENT_PRIVATE_KEY", "").strip()
         self.uses_agent_wallet = bool(agent_key)
         private_key = agent_key or os.environ["BULK_PRIVATE_KEY"].strip()
@@ -104,26 +107,26 @@ class BulkClient(BaseExchangeClient):
 
     def _sign_action(self, action: Dict[str, Any]) -> Dict[str, Any]:
         if not self.uses_agent_wallet:
-            return self._signer.sign(action)
+            return cast(Dict[str, Any], self._signer.sign(cast("OrderItemType", action)))
         # The target account is part of the signed bytes and the order-id hash.
         # Never replace account after signing a transaction for the agent itself.
         prepared = prepare_order(
-            action, self.signature_domain,
+            cast("OrderItemType", action), self.signature_domain,
             account=self.public_key, signer=self.signer_public_key,
         )
         signed = self._signer.sign_prepared(prepared)
         if signed.get("account") != self.public_key or signed.get("signer") != self.signer_public_key:
             raise RuntimeError("Bulk agent signature has unexpected account or signer")
-        return signed
+        return cast(Dict[str, Any], signed)
 
     @staticmethod
-    def resolve_signature_domain(api_url: str, ws_url: str) -> str:
+    def resolve_signature_domain(api_url: str, ws_url: str) -> "SignatureDomain":
         """Return the bulk-keychain network name shared by both endpoints."""
         explicit = os.getenv("BULK_SIGNATURE_DOMAIN", "").strip().lower()
         if explicit:
             if explicit not in {"mainnet", "testnet", "devnet"}:
                 raise ValueError("BULK_SIGNATURE_DOMAIN must be mainnet, testnet, or devnet")
-            return explicit
+            return cast("SignatureDomain", explicit)
         api_domain = BulkClient._domain_for_endpoint(api_url)
         ws_domain = BulkClient._domain_for_endpoint(ws_url)
         if api_domain != ws_domain:
@@ -133,7 +136,7 @@ class BulkClient(BaseExchangeClient):
         return api_domain
 
     @staticmethod
-    def _domain_for_endpoint(url: str) -> str:
+    def _domain_for_endpoint(url: str) -> "SignatureDomain":
         host = url.lower()
         if "mainnet" in host:
             return "mainnet"

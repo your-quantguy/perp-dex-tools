@@ -78,4 +78,4 @@ uv run --locked ruff check .
 uv run --locked pyright
 ```
 
-现有测试可由 pytest 直接运行。Pyright 目前检查交易所基础接口和对冲入口，后续重构时逐步扩展覆盖范围。Ruff 格式化可用于新改动的文件；现有代码尚未整体格式化。
+现有测试可由 pytest 直接运行。Pyright 检查整个项目，包括交易所适配器、交易逻辑和测试。Ruff 格式化可用于新改动的文件；现有代码尚未整体格式化。

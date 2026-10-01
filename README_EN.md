@@ -78,4 +78,4 @@ uv run --locked ruff check .
 uv run --locked pyright
 ```
 
-Pytest runs the existing unittest suite. Pyright currently checks the exchange base interface and hedge entry point; its scope will grow as the code is refactored. Ruff formatting can be applied to files as they are changed; the existing code has not been formatted wholesale.
+Pytest runs the existing unittest suite. Pyright checks the whole project, including exchange adapters, trading logic, and tests. Ruff formatting can be applied to files as they are changed; the existing code has not been formatted wholesale.

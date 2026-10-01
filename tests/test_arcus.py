@@ -4,6 +4,7 @@ import time
 import unittest
 from decimal import Decimal
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 from exchanges.arcus import ArcusAPIError, ArcusClient
@@ -49,8 +50,10 @@ class ArcusBotOrderEventTests(test_bulk_bot.BulkBotOrderEventTests):
         self.assertEqual(self.bot.exchange_client.get_order_for_recovery.await_count, 2)
         self.bot.exchange_client.cancel_order.assert_awaited_once_with("entry")
         self.bot.send_notification.assert_awaited_once()
-        self.assertEqual(self.bot.exchange_client.place_close_order.await_args.args[1], Decimal("0.1"))
-        self.assertEqual(self.bot.exchange_client.place_close_order.await_args.args[2], Decimal("2000.4"))
+        close_call = self.bot.exchange_client.place_close_order.await_args
+        assert close_call is not None
+        self.assertEqual(close_call.args[1], Decimal("0.1"))
+        self.assertEqual(close_call.args[2], Decimal("2000.4"))
 
     async def test_unconfirmed_order_pauses_without_cancel_or_replacement(self):
         self.bot.exchange_client.get_order_price = AsyncMock(side_effect=ConnectionError("stale"))
@@ -103,7 +106,9 @@ class ArcusBotOrderEventTests(test_bulk_bot.BulkBotOrderEventTests):
         self.assertTrue(await self.bot._handle_order_result(OrderResult(
             True, "entry", "buy", Decimal("0.1"), Decimal("2000"), "OPEN"
         )))
-        self.assertEqual(self.bot.exchange_client.place_close_order.await_args.args[1], Decimal("0.04"))
+        close_call = self.bot.exchange_client.place_close_order.await_args
+        assert close_call is not None
+        self.assertEqual(close_call.args[1], Decimal("0.04"))
 
     async def test_stale_quote_before_close_retries_only_after_recovery(self):
         self.bot.order_filled_event.set()
@@ -160,9 +165,9 @@ class ArcusTests(unittest.IsolatedAsyncioTestCase):
         })
         self.env.start()
         self.addCleanup(self.env.stop)
-        self.config = SimpleNamespace(ticker="ETH", quantity=Decimal("0.02"),
+        self.config: Any = SimpleNamespace(ticker="ETH", quantity=Decimal("0.02"),
                                       tick_size=Decimal("0.01"), direction="buy")
-        self.client = ArcusClient(self.config)
+        self.client: Any = ArcusClient(self.config)
         self.client.market_id = 2
         self.client.tick, self.client.step = Decimal("0.01"), Decimal("0.0000001")
         self.client.market = {
@@ -260,7 +265,9 @@ class ArcusTests(unittest.IsolatedAsyncioTestCase):
         order = self.client._remember(self.raw("close", side="SELL"))
         self.client._confirm = AsyncMock(return_value=order)
         await self.client._place(Decimal("0.0001"), Decimal("2700.01"), "sell", True)
-        self.assertTrue(self.client._request.await_args.kwargs["json"]["reduceOnly"])
+        request_call = self.client._request.await_args
+        assert request_call is not None
+        self.assertTrue(request_call.kwargs["json"]["reduceOnly"])
 
     async def test_close_retries_only_confirmed_post_only_cross_and_preserves_target(self):
         self.client.fetch_bbo_prices = AsyncMock(side_effect=[
@@ -420,7 +427,9 @@ class ArcusTests(unittest.IsolatedAsyncioTestCase):
         result = await self.client.cancel_order("entry")
         self.client._confirm.assert_awaited_once()
         self.assertEqual(result.filled_size, Decimal("0.005"))
-        self.assertEqual(self.client._request.await_args.kwargs["json"]["kind"], "orderId")
+        request_call = self.client._request.await_args
+        assert request_call is not None
+        self.assertEqual(request_call.kwargs["json"]["kind"], "orderId")
 
     async def test_cancel_unknown_never_claims_canceled(self):
         self.client._remember(self.raw())
