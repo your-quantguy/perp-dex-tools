@@ -426,14 +426,13 @@ class LighterClient(BaseExchangeClient):
                                        max_slippage_percent: Decimal,
                                        reduce_only: bool = False) -> OrderResult:
         """Submit one bounded IOC market hedge; the caller must confirm the position change."""
-        if side not in {"buy", "sell"} or quantity <= 0:
+        if side not in {"buy", "sell"}:
             raise ValueError("Invalid Lighter hedge side or quantity")
         if not Decimal(0) < max_slippage_percent <= Decimal(5):
             raise ValueError("Lighter hedge slippage limit must be within (0, 5] percent")
+        self.validate_hedge_quantity(quantity)
         base_multiplier, price_multiplier = self._multipliers()
         base_units = quantity * base_multiplier
-        if base_units != base_units.to_integral_value() or base_units <= 0:
-            raise ValueError("Lighter cannot represent the exact hedge quantity")
         bid, ask = await self.fetch_bbo_prices(self.config.contract_id)
         if bid <= 0 or ask <= 0 or bid >= ask:
             raise ConnectionError("Lighter order book is not ready for a hedge")
@@ -468,6 +467,13 @@ class LighterClient(BaseExchangeClient):
             return OrderResult(False, str(order_index),
                                error_message=getattr(response, "message", "Lighter rejected hedge order"))
         return OrderResult(True, str(order_index), side, quantity, price, "SUBMITTED")
+
+    def validate_hedge_quantity(self, quantity: Decimal) -> None:
+        """Lighter sizes are integer multiples of the market's base unit."""
+        base_multiplier, _ = self._multipliers()
+        units = quantity * base_multiplier
+        if not quantity.is_finite() or quantity <= 0 or units != units.to_integral_value():
+            raise ValueError(f"Lighter cannot represent exact hedge quantity {quantity}")
     
     async def get_order_price(self, side: str = '') -> Decimal:
         """Get the price of an order with Lighter using official SDK."""

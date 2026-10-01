@@ -90,6 +90,11 @@ class FakeLighter:
     async def get_account_positions(self):
         return self.position
 
+    def validate_hedge_quantity(self, quantity):
+        units = quantity * self.base_amount_multiplier
+        if quantity <= 0 or units != units.to_integral_value():
+            raise ValueError("Hedge quantity is not exact")
+
     async def place_hedge_market_order(self, quantity, side, max_slippage_percent,
                                        reduce_only=False):
         self.orders.append((side, quantity, reduce_only))
@@ -127,6 +132,31 @@ class HedgeModeTests(unittest.IsolatedAsyncioTestCase):
             HedgeBot(HedgeConfig("arcus", "ETH", Decimal("0.1"), 1),
                      maker, FakeLighter())
         self.assertEqual(maker.orders, [])
+
+    async def test_unsupported_hedge_exchange_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "Unsupported hedge exchange"):
+            HedgeConfig("bulk", "ETH", Decimal("0.1"), 1, hedge_exchange="arcus")
+
+    async def test_hedge_client_must_implement_execution_capability(self):
+        with self.assertRaisesRegex(TypeError, "does not support bounded market hedges"):
+            HedgeBot(HedgeConfig("bulk", "ETH", Decimal("0.1"), 1), FakeMaker(), object())
+
+    async def test_selected_hedge_exchange_is_passed_to_factory(self):
+        with patch("hedge_mode.ExchangeFactory.create_exchange",
+                   side_effect=[FakeMaker(), FakeLighter()]) as create:
+            bot = HedgeBot(HedgeConfig("bulk", "ETH", Decimal("0.1"), 1,
+                                       hedge_exchange="lighter"))
+        self.assertEqual([call.args[0] for call in create.call_args_list], ["bulk", "lighter"])
+        self.assertEqual(bot.hedge_config.exchange, "lighter")
+
+    async def test_inexact_hedge_size_stops_before_maker_order(self):
+        maker, lighter = FakeMaker(), FakeLighter()
+        bot = HedgeBot(HedgeConfig("bulk", "ETH", Decimal("0.0005"), 1), maker, lighter)
+        bot._notify = AsyncMock()
+        with self.assertRaisesRegex(ValueError, "Hedge quantity is not exact"):
+            await bot.run()
+        self.assertEqual(maker.orders, [])
+        self.assertEqual(lighter.orders, [])
 
     async def test_transient_position_read_recovers_before_new_order(self):
         bot, maker, lighter = self.make_bot()
@@ -315,6 +345,14 @@ class HedgeModeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LighterHedgeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_quantity_capability_rejects_inexact_size(self):
+        client = cast(Any, LighterClient.__new__(LighterClient))
+        client.base_amount_multiplier = 1000
+        client.price_multiplier = 100
+        client.validate_hedge_quantity(Decimal("0.1"))
+        with self.assertRaisesRegex(ValueError, "cannot represent exact"):
+            client.validate_hedge_quantity(Decimal("0.0005"))
+
     async def test_failed_signer_check_closes_sdk_session(self):
         client = cast(Any, LighterClient.__new__(LighterClient))
         client.lighter_client = None

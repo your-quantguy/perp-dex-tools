@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Maker trades on Bulk or Arcus, matched by market hedges on Lighter."""
+"""Maker trades on Bulk or Arcus, matched by a selected hedge exchange."""
 
 import argparse
 import asyncio
@@ -9,13 +9,12 @@ import time
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import Protocol, cast
 
 import dotenv
 
 from exchanges import ExchangeFactory
-from exchanges.base import (BaseExchangeClient, LIVE_ORDER_STATUSES, MarketId, OrderInfo,
-                            OrderOutcomeUnknown, OrderResult, TERMINAL_ORDER_STATUSES)
+from exchanges.base import (BaseExchangeClient, HedgeExecutionClient, LIVE_ORDER_STATUSES,
+                            OrderInfo, OrderOutcomeUnknown, OrderResult, TERMINAL_ORDER_STATUSES)
 from helpers import TradingLogger
 from helpers.lark_bot import LarkBot
 from helpers.telegram_bot import TelegramBot
@@ -24,22 +23,7 @@ from trading_bot import TradingConfig
 
 TERMINAL = TERMINAL_ORDER_STATUSES
 LIVE = LIVE_ORDER_STATUSES
-
-
-class LighterHedgeClient(Protocol):
-    base_amount_multiplier: Decimal
-
-    def setup_order_update_handler(self, handler) -> None: ...
-    async def get_contract_attributes(self) -> tuple[MarketId, Decimal]: ...
-    async def connect(self) -> None: ...
-    async def disconnect(self) -> None: ...
-    async def fetch_bbo_prices(self, contract_id: MarketId) -> tuple[Decimal, Decimal]: ...
-    async def get_active_orders(self, contract_id: MarketId) -> list[OrderInfo]: ...
-    async def get_account_positions(self) -> Decimal: ...
-    async def place_hedge_market_order(
-        self, quantity: Decimal, side: str, max_slippage_percent: Decimal,
-        reduce_only: bool = False,
-    ) -> OrderResult: ...
+HEDGE_EXCHANGES = ("lighter",)
 
 
 @dataclass
@@ -54,10 +38,15 @@ class HedgeConfig:
     max_slippage: Decimal = Decimal("0.5")
     target_timeout: float = 600
     recovery_timeout: float = 15
+    hedge_exchange: str = "lighter"
 
     def __post_init__(self):
         if self.exchange not in {"bulk", "arcus"}:
             raise ValueError("Hedge maker exchange must be bulk or arcus")
+        if self.hedge_exchange not in HEDGE_EXCHANGES:
+            raise ValueError(f"Unsupported hedge exchange: {self.hedge_exchange}")
+        if self.exchange == self.hedge_exchange:
+            raise ValueError("Maker and hedge exchanges must differ")
         if (self.size <= 0 or self.iterations <= 0 or self.fill_timeout <= 0
                 or self.target_timeout <= 0 or self.recovery_timeout <= 0):
             raise ValueError("Size, iterations and timeouts must be positive")
@@ -70,32 +59,37 @@ class HedgeConfig:
 
 
 class HedgeBot:
-    def __init__(self, config: HedgeConfig, maker_client=None, lighter_client=None):
+    def __init__(self, config: HedgeConfig, maker_client=None, hedge_client=None):
         self.config = config
-        self.logger = TradingLogger(f"{config.exchange}_lighter_hedge", config.ticker, log_to_console=True)
+        self.logger = TradingLogger(
+            f"{config.exchange}_{config.hedge_exchange}_hedge", config.ticker, log_to_console=True,
+        )
         self.maker_config = TradingConfig(
             ticker=config.ticker, contract_id="", tick_size=Decimal(0),
             quantity=config.size, take_profit=Decimal(0), direction="buy",
             max_orders=1, wait_time=0, exchange=config.exchange,
             grid_step=Decimal(-100), stop_price=Decimal(-1), pause_price=Decimal(-1),
         )
-        self.lighter_config = TradingConfig(
+        self.hedge_config = TradingConfig(
             ticker=config.ticker, contract_id="", tick_size=Decimal(0),
             quantity=config.size, take_profit=Decimal(0), direction="sell",
-            max_orders=1, wait_time=0, exchange="lighter",
+            max_orders=1, wait_time=0, exchange=config.hedge_exchange,
             grid_step=Decimal(-100), stop_price=Decimal(-1), pause_price=Decimal(-1),
         )
         self.maker: BaseExchangeClient = maker_client or ExchangeFactory.create_exchange(
             config.exchange, self.maker_config,
         )
-        self.lighter = cast(LighterHedgeClient, lighter_client or ExchangeFactory.create_exchange(
-            "lighter", self.lighter_config,
-        ))
+        selected_hedge = hedge_client or ExchangeFactory.create_exchange(
+            config.hedge_exchange, self.hedge_config,
+        )
+        if not isinstance(selected_hedge, HedgeExecutionClient):
+            raise TypeError(f"{config.hedge_exchange} does not support bounded market hedges")
+        self.hedge = selected_hedge
         maker_network = getattr(self.maker, "signature_domain", None) or getattr(self.maker, "network", "mainnet")
-        if maker_network != "mainnet":
+        if config.hedge_exchange == "lighter" and maker_network != "mainnet":
             raise ValueError("Lighter hedge mode requires the maker exchange on mainnet too")
         self.maker.setup_order_update_handler(lambda _message: None)
-        self.lighter.setup_order_update_handler(lambda _message: None)
+        self.hedge.setup_order_update_handler(lambda _message: None)
 
     async def _notify(self, message: str):
         token = os.getenv("LARK_TOKEN")
@@ -112,31 +106,31 @@ class HedgeBot:
     async def _positions(self) -> Decimal:
         deadline = time.monotonic() + self.config.recovery_timeout
         maker: Decimal | None = None
-        lighter: Decimal | None = None
+        hedge: Decimal | None = None
         last_error: Exception | None = None
         while True:
             try:
                 maker = await self.maker.get_account_positions()
-                lighter = await self.lighter.get_account_positions()
+                hedge = await self.hedge.get_account_positions()
             except Exception as exc:
                 last_error = exc
             else:
-                if maker + lighter == 0:
+                if maker + hedge == 0:
                     return maker
             if time.monotonic() >= deadline:
                 raise RuntimeError(
                     f"Unmatched or unreadable positions: {self.config.exchange}={maker}, "
-                    f"Lighter={lighter}, read_error={last_error}"
+                    f"{self.config.hedge_exchange}={hedge}, read_error={last_error}"
                 )
             await asyncio.sleep(0.25)
 
-    async def _confirm_lighter_target(self, target: Decimal):
+    async def _confirm_hedge_target(self, target: Decimal):
         deadline = time.monotonic() + self.config.recovery_timeout
         position: Decimal | None = None
         last_error: Exception | None = None
         while time.monotonic() < deadline:
             try:
-                position = await self.lighter.get_account_positions()
+                position = await self.hedge.get_account_positions()
             except Exception as exc:
                 last_error = exc
             else:
@@ -144,21 +138,22 @@ class HedgeBot:
                     return
             await asyncio.sleep(0.25)
         try:
-            position = await self.lighter.get_account_positions()
+            position = await self.hedge.get_account_positions()
         except Exception as exc:
             last_error = exc
         else:
             if position == target:
                 return
         raise RuntimeError(
-            f"Lighter hedge not fully confirmed: target={target}, actual={position}, read_error={last_error}"
+            f"{self.config.hedge_exchange} hedge not fully confirmed: "
+            f"target={target}, actual={position}, read_error={last_error}"
         )
 
     async def _hedge_to(self, target: Decimal):
         deadline = time.monotonic() + self.config.recovery_timeout
         while True:
             try:
-                current = await self.lighter.get_account_positions()
+                current = await self.hedge.get_account_positions()
                 break
             except Exception:
                 if time.monotonic() >= deadline:
@@ -168,27 +163,25 @@ class HedgeBot:
         if difference == 0:
             return
         quantity = abs(difference)
-        if quantity * self.lighter.base_amount_multiplier != (
-            quantity * self.lighter.base_amount_multiplier
-        ).to_integral_value():
-            raise RuntimeError(f"Lighter cannot represent exact hedge quantity {quantity}")
+        self.hedge.validate_hedge_quantity(quantity)
         side = "buy" if difference > 0 else "sell"
         reduce_only = current != 0 and current * difference < 0 and quantity <= abs(current)
         try:
-            result = await self.lighter.place_hedge_market_order(
+            result = await self.hedge.place_hedge_market_order(
                 quantity, side, self.config.max_slippage, reduce_only=reduce_only,
             )
         except OrderOutcomeUnknown as exc:
             # An ACK can be lost after execution. A confirmed target position
             # resolves that case without sending another market order.
-            self.logger.log(f"Lighter hedge acknowledgement unknown; checking target position: {exc}", "WARNING")
-            await self._confirm_lighter_target(target)
-            if await self.lighter.get_active_orders(self.lighter_config.contract_id):
-                raise RuntimeError("Lighter hedge acknowledgement unknown and an active order remains")
+            self.logger.log(f"{self.config.hedge_exchange} hedge acknowledgement unknown; "
+                            f"checking target position: {exc}", "WARNING")
+            await self._confirm_hedge_target(target)
+            if await self.hedge.get_active_orders(self.hedge_config.contract_id):
+                raise RuntimeError("Hedge acknowledgement unknown and an active order remains")
             return
         if not result.success:
-            raise RuntimeError(f"Lighter hedge rejected: {result.error_message}")
-        await self._confirm_lighter_target(target)
+            raise RuntimeError(f"{self.config.hedge_exchange} hedge rejected: {result.error_message}")
+        await self._confirm_hedge_target(target)
 
     async def _confirmed_maker_fill(self, starting_position: Decimal, side: str,
                                     quantity: Decimal, filled: Decimal,
@@ -262,10 +255,7 @@ class HedgeBot:
 
     async def _execute_maker_order(self, side: str, quantity: Decimal,
                                    starting_position: Decimal, reduce_only: bool) -> Decimal:
-        if quantity * self.lighter.base_amount_multiplier != (
-            quantity * self.lighter.base_amount_multiplier
-        ).to_integral_value():
-            raise ValueError("Order quantity cannot be hedged exactly on Lighter")
+        self.hedge.validate_hedge_quantity(quantity)
         try:
             if reduce_only:
                 bid, ask = await self.maker.fetch_bbo_prices(self.maker_config.contract_id)
@@ -371,7 +361,7 @@ class HedgeBot:
         deadline = time.monotonic() + 20
         for client, contract_id, name in (
             (self.maker, self.maker_config.contract_id, self.config.exchange),
-            (self.lighter, self.lighter_config.contract_id, "Lighter"),
+            (self.hedge, self.hedge_config.contract_id, self.config.hedge_exchange),
         ):
             while time.monotonic() < deadline:
                 try:
@@ -389,20 +379,17 @@ class HedgeBot:
             self.maker_config.contract_id, self.maker_config.tick_size = (
                 await self.maker.get_contract_attributes()
             )
-            self.lighter_config.contract_id, self.lighter_config.tick_size = (
-                await self.lighter.get_contract_attributes()
+            self.hedge_config.contract_id, self.hedge_config.tick_size = (
+                await self.hedge.get_contract_attributes()
             )
             await self.maker.connect()
-            await self.lighter.connect()
+            await self.hedge.connect()
             await self._wait_for_books()
-            if self.config.size * self.lighter.base_amount_multiplier != (
-                self.config.size * self.lighter.base_amount_multiplier
-            ).to_integral_value():
-                raise ValueError("Configured order size cannot be hedged exactly on Lighter")
+            self.hedge.validate_hedge_quantity(self.config.size)
             if await self.maker.get_active_orders(self.maker_config.contract_id):
                 raise RuntimeError("Maker account has active orders; start with a dedicated flat account")
-            if await self.lighter.get_active_orders(self.lighter_config.contract_id):
-                raise RuntimeError("Lighter account has active orders; start with a dedicated flat account")
+            if await self.hedge.get_active_orders(self.hedge_config.contract_id):
+                raise RuntimeError("Hedge account has active orders; start with a dedicated flat account")
             if await self._positions() != 0:
                 raise RuntimeError("Hedge mode requires flat positions at startup")
 
@@ -417,7 +404,8 @@ class HedgeBot:
                 await self._reach_target(Decimal(0))
             self.logger.log("Hedge cycles complete; both positions are flat", "INFO")
         except BaseException as exc:
-            message = (f"[{self.config.exchange.upper()}+LIGHTER {self.config.ticker}] "
+            message = (f"[{self.config.exchange.upper()}+{self.config.hedge_exchange.upper()} "
+                       f"{self.config.ticker}] "
                        f"Hedge mode stopped: {type(exc).__name__}: {exc}. "
                        "Check both exchanges' orders and positions before restarting.")
             self.logger.log(message, "ERROR")
@@ -427,14 +415,16 @@ class HedgeBot:
                 self.logger.log(f"Hedge notification failed: {notify_error}", "ERROR")
             raise
         finally:
-            await asyncio.gather(self.maker.disconnect(), self.lighter.disconnect(),
+            await asyncio.gather(self.maker.disconnect(), self.hedge.disconnect(),
                                  return_exceptions=True)
 
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--exchange", required=True, choices=("bulk", "arcus"),
-                        help="Maker exchange; Lighter is always the hedge leg")
+                        help="Maker exchange")
+    parser.add_argument("--hedge-exchange", choices=HEDGE_EXCHANGES, default="lighter",
+                        help="Hedge exchange (currently only lighter)")
     parser.add_argument("--ticker", default="ETH")
     parser.add_argument("--size", type=Decimal, required=True, help="Underlying amount per maker order")
     parser.add_argument("--iter", type=int, required=True, help="Number of hedge cycles")
@@ -445,7 +435,7 @@ def parse_arguments():
     parser.add_argument("--max-position", type=Decimal, default=Decimal(0),
                         help="Absolute maker position cap; zero means one flat round trip per cycle")
     parser.add_argument("--max-slippage", type=Decimal, default=Decimal("0.5"),
-                        help="Maximum Lighter market hedge slippage in percent (default: 0.5)")
+                        help="Maximum hedge market order slippage in percent (default: 0.5)")
     parser.add_argument("--target-timeout", type=float, default=600,
                         help="Seconds allowed to reach each maker position target")
     parser.add_argument("--recovery-timeout", type=float, default=15,
@@ -461,7 +451,8 @@ async def main():
     dotenv.load_dotenv(args.env_file)
     config = HedgeConfig(
         exchange=args.exchange, ticker=args.ticker.upper(), size=args.size,
-        iterations=args.iter, fill_timeout=args.fill_timeout, sleep_time=args.sleep,
+        iterations=args.iter, hedge_exchange=args.hedge_exchange,
+        fill_timeout=args.fill_timeout, sleep_time=args.sleep,
         max_position=args.max_position, max_slippage=args.max_slippage,
         target_timeout=args.target_timeout, recovery_timeout=args.recovery_timeout,
     )

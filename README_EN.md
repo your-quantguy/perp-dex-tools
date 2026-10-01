@@ -50,11 +50,13 @@ uv run --locked python runbot.py --exchange lighter --ticker ETH --direction buy
 
 `hedge_mode.py` places maker orders on Bulk or Arcus and uses an equal, opposite market order on Lighter for each confirmed fill. It cancels an unfilled maker order after `--fill-timeout`, reconciles the final fill, and checks both positions before placing another order. If a known order ID loses its submit acknowledgement, a read briefly fails, or a cancel acknowledgement is lost, the bot reconciles orders and positions within `--recovery-timeout` and continues once confirmed. An unresolved outcome stops new orders and triggers configured Telegram or Lark alerts; orders are never blindly resubmitted.
 
+Select the hedge leg with `--hedge-exchange`; it defaults to `lighter`, the only supported choice for now. A hedge adapter must validate exact order quantities, submit an immediate order with a slippage bound that cannot remain active, and expose market data, active orders, and positions. The strategy still confirms the resulting position after an order acknowledgment.
+
 Lighter currently connects only to mainnet, so the maker exchange **must also be on mainnet**. Both accounts must start flat with no active orders in the selected market. Configure credentials for both exchanges and verify market availability, fees, account limits, and sufficient Lighter margin.
 
 ```bash
 uv run --locked python hedge_mode.py --exchange bulk --ticker ETH --size 0.1 --iter 2
-uv run --locked python hedge_mode.py --exchange arcus --ticker ETH --size 0.1 --iter 2 --max-position 0.5
+uv run --locked python hedge_mode.py --exchange arcus --hedge-exchange lighter --ticker ETH --size 0.1 --iter 2 --max-position 0.5
 ```
 
 `--size` is the underlying amount per maker order; `--iter` is the cycle count. With the default `--max-position 0`, each cycle buys from flat and sells back to flat. With a positive value, the maker position grows to `+max-position`, then reverses to `-max-position`; the final cycle returns to flat. The two legs remain opposite. `max-position` must be an exact multiple of `size`. `--max-slippage` limits each Lighter market hedge to 0.5% by default, `--target-timeout` defaults to 600 seconds per position target, and `--recovery-timeout` defaults to 15 seconds for order reconciliation. On exit, the bot does not force close positions or cancel orders whose outcomes are uncertain; review both accounts manually.
