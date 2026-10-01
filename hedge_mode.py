@@ -14,7 +14,7 @@ from typing import Protocol, cast
 import dotenv
 
 from exchanges import ExchangeFactory
-from exchanges.base import BaseExchangeClient, MarketId, OrderInfo, OrderResult
+from exchanges.base import BaseExchangeClient, MarketId, OrderInfo, OrderOutcomeUnknown, OrderResult
 from helpers import TradingLogger
 from helpers.lark_bot import LarkBot
 from helpers.telegram_bot import TelegramBot
@@ -22,6 +22,7 @@ from trading_bot import TradingConfig
 
 
 TERMINAL = {"FILLED", "CANCELED", "REJECTED"}
+LIVE = {"OPEN", "PARTIALLY_FILLED"}
 
 
 class LighterHedgeClient(Protocol):
@@ -51,12 +52,14 @@ class HedgeConfig:
     max_position: Decimal = Decimal(0)
     max_slippage: Decimal = Decimal("0.5")
     target_timeout: float = 600
+    recovery_timeout: float = 15
 
     def __post_init__(self):
         if self.exchange not in {"bulk", "arcus"}:
             raise ValueError("Hedge maker exchange must be bulk or arcus")
-        if self.size <= 0 or self.iterations <= 0 or self.fill_timeout <= 0 or self.target_timeout <= 0:
-            raise ValueError("Size, iterations, fill timeout and target timeout must be positive")
+        if (self.size <= 0 or self.iterations <= 0 or self.fill_timeout <= 0
+                or self.target_timeout <= 0 or self.recovery_timeout <= 0):
+            raise ValueError("Size, iterations and timeouts must be positive")
         if self.sleep_time < 0 or not Decimal(0) < self.max_slippage <= Decimal(5):
             raise ValueError("Sleep must be nonnegative and slippage must be within (0, 5] percent")
         if self.max_position < 0 or (self.max_position and self.max_position < self.size):
@@ -106,24 +109,60 @@ class HedgeBot:
             await asyncio.to_thread(send)
 
     async def _positions(self) -> Decimal:
-        maker = await self.maker.get_account_positions()
-        lighter = await self.lighter.get_account_positions()
-        if maker + lighter != 0:
-            raise RuntimeError(f"Unmatched positions: {self.config.exchange}={maker}, Lighter={lighter}")
-        return maker
+        deadline = time.monotonic() + self.config.recovery_timeout
+        maker: Decimal | None = None
+        lighter: Decimal | None = None
+        last_error: Exception | None = None
+        while True:
+            try:
+                maker = await self.maker.get_account_positions()
+                lighter = await self.lighter.get_account_positions()
+            except Exception as exc:
+                last_error = exc
+            else:
+                if maker + lighter == 0:
+                    return maker
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"Unmatched or unreadable positions: {self.config.exchange}={maker}, "
+                    f"Lighter={lighter}, read_error={last_error}"
+                )
+            await asyncio.sleep(0.25)
 
     async def _confirm_lighter_target(self, target: Decimal):
-        deadline = time.monotonic() + 15
+        deadline = time.monotonic() + self.config.recovery_timeout
+        position: Decimal | None = None
+        last_error: Exception | None = None
         while time.monotonic() < deadline:
+            try:
+                position = await self.lighter.get_account_positions()
+            except Exception as exc:
+                last_error = exc
+            else:
+                if position == target:
+                    return
+            await asyncio.sleep(0.25)
+        try:
             position = await self.lighter.get_account_positions()
+        except Exception as exc:
+            last_error = exc
+        else:
             if position == target:
                 return
-            await asyncio.sleep(0.25)
-        position = await self.lighter.get_account_positions()
-        raise RuntimeError(f"Lighter hedge not fully confirmed: target={target}, actual={position}")
+        raise RuntimeError(
+            f"Lighter hedge not fully confirmed: target={target}, actual={position}, read_error={last_error}"
+        )
 
     async def _hedge_to(self, target: Decimal):
-        current = await self.lighter.get_account_positions()
+        deadline = time.monotonic() + self.config.recovery_timeout
+        while True:
+            try:
+                current = await self.lighter.get_account_positions()
+                break
+            except Exception:
+                if time.monotonic() >= deadline:
+                    raise
+                await asyncio.sleep(0.25)
         difference = target - current
         if difference == 0:
             return
@@ -134,9 +173,18 @@ class HedgeBot:
             raise RuntimeError(f"Lighter cannot represent exact hedge quantity {quantity}")
         side = "buy" if difference > 0 else "sell"
         reduce_only = current != 0 and current * difference < 0 and quantity <= abs(current)
-        result = await self.lighter.place_hedge_market_order(
-            quantity, side, self.config.max_slippage, reduce_only=reduce_only,
-        )
+        try:
+            result = await self.lighter.place_hedge_market_order(
+                quantity, side, self.config.max_slippage, reduce_only=reduce_only,
+            )
+        except OrderOutcomeUnknown as exc:
+            # An ACK can be lost after execution. A confirmed target position
+            # resolves that case without sending another market order.
+            self.logger.log(f"Lighter hedge acknowledgement unknown; checking target position: {exc}", "WARNING")
+            await self._confirm_lighter_target(target)
+            if await self.lighter.get_active_orders(self.lighter_config.contract_id):
+                raise RuntimeError("Lighter hedge acknowledgement unknown and an active order remains")
+            return
         if not result.success:
             raise RuntimeError(f"Lighter hedge rejected: {result.error_message}")
         await self._confirm_lighter_target(target)
@@ -152,24 +200,89 @@ class HedgeBot:
             self.logger.log(f"Hedged {filled - previous} {self.config.ticker} after maker fill", "INFO")
         return filled
 
+    async def _read_maker_order(self, order_id: str) -> OrderInfo | None:
+        # Arcus's ordinary getter can return a cached live snapshot. Recovery
+        # needs its authoritative REST read before placing another order.
+        recovery_read = getattr(self.maker, "get_order_for_recovery", None)
+        if self.config.exchange == "arcus" and recovery_read is not None:
+            return await recovery_read(order_id)
+        return await self.maker.get_order_info(order_id)
+
+    async def _observe_maker_order(self, order: OrderInfo, order_id: str, side: str,
+                                   quantity: Decimal, starting_position: Decimal,
+                                   filled: Decimal) -> Decimal:
+        if order.order_id != order_id or order.side != side or order.status not in LIVE | TERMINAL:
+            raise RuntimeError(f"Maker order {order_id} returned an inconsistent snapshot")
+        return await self._confirmed_maker_fill(
+            starting_position, side, quantity, Decimal(order.filled_size), filled,
+        )
+
+    async def _recover_maker_terminal(self, order_id: str, side: str, quantity: Decimal,
+                                      starting_position: Decimal, filled: Decimal) -> Decimal:
+        """Cancel a known order, hedge late fills, and wait for a confirmed terminal state."""
+        deadline = time.monotonic() + self.config.recovery_timeout
+        last_error: Exception | None = None
+        read_after_cancel = False
+        last_cancel_at = 0.0
+        while time.monotonic() < deadline or read_after_cancel:
+            read_after_cancel = False
+            try:
+                order = await self._read_maker_order(order_id)
+            except Exception as exc:
+                last_error = exc
+                await asyncio.sleep(0.25)
+                continue
+            if order is not None:
+                filled = await self._observe_maker_order(
+                    order, order_id, side, quantity, starting_position, filled,
+                )
+                if order.status in TERMINAL:
+                    return filled
+                if time.monotonic() - last_cancel_at >= 2:
+                    last_cancel_at = time.monotonic()
+                    read_after_cancel = True
+                    try:
+                        canceled = await self.maker.cancel_order(order_id)
+                    except Exception as exc:
+                        # A lost cancel ACK may still have canceled or filled
+                        # the order; the next read resolves it when possible.
+                        last_error = exc
+                    else:
+                        if canceled.order_id and canceled.order_id != order_id:
+                            raise RuntimeError("Maker cancel returned a different order ID")
+                        if canceled.filled_size is not None:
+                            filled = await self._confirmed_maker_fill(
+                                starting_position, side, quantity, Decimal(canceled.filled_size), filled,
+                            )
+                        if not canceled.success:
+                            last_error = RuntimeError(f"Maker cancel not confirmed: {canceled.error_message}")
+            await asyncio.sleep(0.25)
+        raise RuntimeError(f"Maker order {order_id} terminal state is unconfirmed: {last_error}")
+
     async def _execute_maker_order(self, side: str, quantity: Decimal,
                                    starting_position: Decimal, reduce_only: bool) -> Decimal:
         if quantity * self.lighter.base_amount_multiplier != (
             quantity * self.lighter.base_amount_multiplier
         ).to_integral_value():
             raise ValueError("Order quantity cannot be hedged exactly on Lighter")
-        if reduce_only:
-            bid, ask = await self.maker.fetch_bbo_prices(self.maker_config.contract_id)
-            if bid <= 0 or ask <= 0 or bid >= ask:
-                raise ConnectionError("Maker order book is not ready")
-            price = bid if side == "buy" else ask
-            result = await self.maker.place_close_order(
-                self.maker_config.contract_id, quantity, price, side,
-            )
-        else:
-            result = await self.maker.place_open_order(
-                self.maker_config.contract_id, quantity, side,
-            )
+        try:
+            if reduce_only:
+                bid, ask = await self.maker.fetch_bbo_prices(self.maker_config.contract_id)
+                if bid <= 0 or ask <= 0 or bid >= ask:
+                    raise ConnectionError("Maker order book is not ready")
+                price = bid if side == "buy" else ask
+                result = await self.maker.place_close_order(
+                    self.maker_config.contract_id, quantity, price, side,
+                )
+            else:
+                result = await self.maker.place_open_order(
+                    self.maker_config.contract_id, quantity, side,
+                )
+        except OrderOutcomeUnknown as exc:
+            if not exc.order_id:
+                raise
+            self.logger.log(f"Maker acknowledgement unknown; reconciling order {exc.order_id}", "WARNING")
+            result = OrderResult(True, exc.order_id, side, quantity, status="OPEN")
         if not result.order_id:
             if result.filled_size:
                 raise RuntimeError("Maker order reports a fill without an order ID")
@@ -187,27 +300,20 @@ class HedgeBot:
             status = result.status or "OPEN"
             deadline = time.monotonic() + self.config.fill_timeout
             while status not in TERMINAL and time.monotonic() < deadline:
-                order = await self.maker.get_order_info(order_id)
-                if order is None:
-                    raise RuntimeError(f"Maker order {order_id} state is unknown")
-                filled = await self._confirmed_maker_fill(
-                    starting_position, side, quantity, Decimal(order.filled_size), filled,
-                )
-                status = order.status
+                try:
+                    order = await self._read_maker_order(order_id)
+                except Exception as exc:
+                    self.logger.log(f"Maker order {order_id} read failed; retrying: {exc}", "WARNING")
+                    order = None
+                if order is not None:
+                    filled = await self._observe_maker_order(
+                        order, order_id, side, quantity, starting_position, filled,
+                    )
+                    status = order.status
                 if status not in TERMINAL:
                     await asyncio.sleep(0.25)
-            if status not in TERMINAL:
-                canceled = await self.maker.cancel_order(order_id)
-                if not canceled.success:
-                    raise RuntimeError(f"Maker cancel not confirmed: {canceled.error_message}")
-                filled = await self._confirmed_maker_fill(
-                    starting_position, side, quantity, Decimal(canceled.filled_size or 0), filled,
-                )
-            confirmed = await self.maker.get_order_info(order_id)
-            if confirmed is None or confirmed.status not in TERMINAL:
-                raise RuntimeError(f"Maker order {order_id} has no confirmed terminal state")
-            filled = await self._confirmed_maker_fill(
-                starting_position, side, quantity, Decimal(confirmed.filled_size), filled,
+            filled = await self._recover_maker_terminal(
+                order_id, side, quantity, starting_position, filled,
             )
             terminal = True
             return filled
@@ -224,7 +330,13 @@ class HedgeBot:
             position = await self._positions()
             if position == target:
                 return
-            if await self.maker.get_active_orders(self.maker_config.contract_id):
+            try:
+                active_orders = await self.maker.get_active_orders(self.maker_config.contract_id)
+            except (ConnectionError, TimeoutError, OSError) as exc:
+                self.logger.log(f"Maker active-order read failed; retrying: {exc}", "WARNING")
+                await asyncio.sleep(1)
+                continue
+            if active_orders:
                 raise RuntimeError("Unexpected active maker order; review it before continuing")
             difference = target - position
             side = "buy" if difference > 0 else "sell"
@@ -239,8 +351,14 @@ class HedgeBot:
             else:
                 expected = position + (filled if side == "buy" else -filled)
                 settle_deadline = time.monotonic() + 10
+                actual: Decimal | None = None
                 while time.monotonic() < settle_deadline:
-                    actual = await self.maker.get_account_positions()
+                    try:
+                        actual = await self.maker.get_account_positions()
+                    except (ConnectionError, TimeoutError, OSError) as exc:
+                        self.logger.log(f"Maker position read failed; retrying: {exc}", "WARNING")
+                        await asyncio.sleep(0.25)
+                        continue
                     if actual == expected:
                         break
                     await asyncio.sleep(0.25)
@@ -329,6 +447,8 @@ def parse_arguments():
                         help="Maximum Lighter market hedge slippage in percent (default: 0.5)")
     parser.add_argument("--target-timeout", type=float, default=600,
                         help="Seconds allowed to reach each maker position target")
+    parser.add_argument("--recovery-timeout", type=float, default=15,
+                        help="Seconds allowed to reconcile a known maker order after a read or cancel failure")
     parser.add_argument("--env-file", default=".env")
     return parser.parse_args()
 
@@ -342,7 +462,7 @@ async def main():
         exchange=args.exchange, ticker=args.ticker.upper(), size=args.size,
         iterations=args.iter, fill_timeout=args.fill_timeout, sleep_time=args.sleep,
         max_position=args.max_position, max_slippage=args.max_slippage,
-        target_timeout=args.target_timeout,
+        target_timeout=args.target_timeout, recovery_timeout=args.recovery_timeout,
     )
     await HedgeBot(config).run()
 

@@ -13,6 +13,14 @@ from tenacity import RetryCallState, retry, retry_if_exception_type, stop_after_
 MarketId = str | int
 
 
+class OrderOutcomeUnknown(RuntimeError):
+    """A submitted order may exist; an exchange order ID allows reconciliation."""
+
+    def __init__(self, message: str, order_id: str | None = None):
+        super().__init__(message)
+        self.order_id = order_id
+
+
 class ExchangeConfig(Protocol):
     """Configuration fields shared by exchange clients."""
 

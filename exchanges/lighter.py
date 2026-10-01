@@ -9,7 +9,7 @@ import logging
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from typing import TYPE_CHECKING, Dict, Any, List, Optional, Tuple, cast
 
-from .base import BaseExchangeClient, ExchangeConfig, MarketId, OrderResult, OrderInfo, query_retry
+from .base import BaseExchangeClient, ExchangeConfig, MarketId, OrderOutcomeUnknown, OrderResult, OrderInfo, query_retry
 from helpers.logger import TradingLogger
 
 # Import official Lighter SDK for API client
@@ -427,7 +427,7 @@ class LighterClient(BaseExchangeClient):
                 api_key_index=self.api_key_index,
             )
         except Exception as exc:
-            raise RuntimeError(f"Lighter hedge submission outcome is unknown for {order_index}") from exc
+            raise OrderOutcomeUnknown(f"Lighter hedge submission outcome is unknown for {order_index}", str(order_index)) from exc
         if error is not None:
             return OrderResult(False, str(order_index), error_message=str(error))
         if response is None or response.code != 0:

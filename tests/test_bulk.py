@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 import aiohttp
 import base58
 
-from exchanges.base import OrderResult
+from exchanges.base import OrderOutcomeUnknown, OrderResult
 from exchanges.bulk import BulkClient
 
 
@@ -144,6 +144,34 @@ class BulkClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(signed[1]["reduce_only"])
         posted = self.client._post_signed.await_args_list[0].args[0]
         self.assertEqual(set(posted), {"actions", "nonce", "account", "signer", "signature", "order_id"})
+
+    async def test_lost_submit_ack_exposes_signed_order_id_for_recovery(self):
+        self.client._lot_size = Decimal("0.1")
+        self.client._min_notional = Decimal(0)
+        self.client._wait_market_ready = AsyncMock()
+        self.client._sign_action = lambda _action: {"order_id": "entry"}
+        self.client._post_signed = AsyncMock(side_effect=TimeoutError())
+        with self.assertRaisesRegex(OrderOutcomeUnknown, "outcome is unknown") as caught:
+            await self.client._place_limit(Decimal("0.1"), Decimal(2000), "buy", False)
+        self.assertEqual(caught.exception.order_id, "entry")
+        self.client._post_signed.assert_awaited_once()
+
+        self.client._account = AsyncMock(return_value={"openOrders": [], "positions": []})
+        self.client._filled_size_from_history = AsyncMock(return_value=Decimal("0.1"))
+        recovered = await self.client.get_order_info("entry")
+        self.assertIsNotNone(recovered)
+        self.assertEqual(recovered.status, "FILLED")
+        self.assertEqual(recovered.filled_size, Decimal("0.1"))
+
+    async def test_lost_submit_ack_with_incomplete_history_stays_unknown(self):
+        self.client._uncertain_orders["entry"] = SimpleNamespace(
+            order_id="entry", side="buy", size=Decimal("0.1"), price=Decimal(2000),
+            status="OPEN", filled_size=Decimal(0), remaining_size=Decimal("0.1"),
+        )
+        self.client._account = AsyncMock(return_value={"openOrders": [], "positions": []})
+        self.client._filled_size_from_history = AsyncMock(return_value=Decimal("0.04"))
+        with self.assertRaisesRegex(RuntimeError, "absent without a confirmed final state"):
+            await self.client.get_order_info("entry")
 
     async def test_close_retries_when_post_only_order_would_cross(self):
         self._market_is_connected()

@@ -20,7 +20,7 @@ from bulk_keychain import Signer, prepare_order
 if TYPE_CHECKING:
     from bulk_keychain import OrderItemType, SignatureDomain
 
-from .base import BaseExchangeClient, OrderInfo, OrderResult
+from .base import BaseExchangeClient, OrderInfo, OrderOutcomeUnknown, OrderResult
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +75,7 @@ class BulkClient(BaseExchangeClient):
         self._ws_http: Optional[aiohttp.ClientSession] = None
         self._handler = None
         self._orders: Dict[str, OrderInfo] = {}
+        self._uncertain_orders: Dict[str, OrderInfo] = {}
         self._owned_open_order_ids = set()
         self._order_events: Dict[str, asyncio.Event] = {}
         self._fill_totals: Dict[str, Decimal] = {}
@@ -569,7 +570,10 @@ class BulkClient(BaseExchangeClient):
                                filled_size=stored.filled_size)
         except Exception as exc:
             # A timed-out post may have reached the exchange. Do not silently retry it.
-            raise RuntimeError(f"Bulk order outcome is unknown: {exc}") from exc
+            self._uncertain_orders[order_id] = OrderInfo(
+                order_id, side, quantity, price, "OPEN", remaining_size=quantity,
+            )
+            raise OrderOutcomeUnknown(f"Bulk order outcome is unknown: {exc}", order_id) from exc
 
     async def place_open_order(self, contract_id: str, quantity: Decimal, direction: str) -> OrderResult:
         price = await self.get_order_price(direction)
@@ -713,13 +717,27 @@ class BulkClient(BaseExchangeClient):
     async def get_order_info(self, order_id: str) -> Optional[OrderInfo]:
         cached = self._orders.get(order_id)
         if cached is not None and cached.status in {"FILLED", "CANCELED"}:
+            self._uncertain_orders.pop(order_id, None)
             return cached
         for order in await self.get_active_orders(self.symbol):
             if order.order_id == order_id:
                 return order
         cached = self._orders.get(order_id)
         if cached is not None and cached.status in {"FILLED", "CANCELED"}:
+            self._uncertain_orders.pop(order_id, None)
             return cached
+        uncertain = self._uncertain_orders.get(order_id)
+        if uncertain is not None:
+            filled = await self._filled_size_from_history(order_id)
+            if filled > uncertain.size:
+                raise RuntimeError(f"Bulk fills exceed original size for order {order_id}")
+            if filled == uncertain.size:
+                uncertain.status = "FILLED"
+                uncertain.filled_size = filled
+                uncertain.remaining_size = Decimal(0)
+                self._remember(uncertain)
+                self._uncertain_orders.pop(order_id, None)
+                return uncertain
         raise RuntimeError(f"Bulk order {order_id} is absent without a confirmed final state")
 
     async def get_account_positions(self) -> Decimal:

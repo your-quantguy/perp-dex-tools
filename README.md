@@ -46,7 +46,7 @@ uv run --locked python runbot.py --exchange lighter --ticker ETH --direction buy
 
 ## 对冲模式
 
-`hedge_mode.py` 在 Bulk 或 Arcus 挂 maker 单，每次确认成交量后在 Lighter 下等量反向市价单。maker 单到 `--fill-timeout` 后会撤单，并依据确认的最终成交量补齐对冲；两腿仓位核对通过后才开始下一笔。订单或成交结果不明时停止下单并通过已配置的 Telegram/飞书渠道告警。
+`hedge_mode.py` 在 Bulk 或 Arcus 挂 maker 单，每次确认成交量后在 Lighter 下等量反向市价单。maker 单到 `--fill-timeout` 后会撤单，并依据确认的最终成交量补齐对冲；两腿仓位核对通过后才开始下一笔。已知订单 ID 的提交回执丢失、短暂查询失败或撤单回执丢失时，会在 `--recovery-timeout` 内核对订单与仓位，确认后继续；结果仍不明时停止新单并通过已配置的 Telegram/飞书渠道告警，不会盲目重发订单。
 
 Lighter 目前只连接主网，因此对冲模式要求 Bulk 或 Arcus **同样使用主网**。启动时要求两个账户在该市场无仓位、无活动订单。请分别配置两家的凭据，并先确认市场、额度、费用与 Lighter 保证金足以执行反向单。
 
@@ -55,7 +55,7 @@ uv run --locked python hedge_mode.py --exchange bulk --ticker ETH --size 0.1 --i
 uv run --locked python hedge_mode.py --exchange arcus --ticker ETH --size 0.1 --iter 2 --max-position 0.5
 ```
 
-`--size` 是每笔 maker 订单的标的数量；`--iter` 是循环次数。默认 `--max-position 0` 时，每轮从零仓位买入并对冲，再卖出回零。设置正值后，maker 仓位逐笔累积到 `+max-position`，再逐笔反向到 `-max-position`；最后一轮结束后回到零，两腿始终保持反向。`max-position` 必须是 `size` 的整数倍。`--max-slippage` 默认限制 Lighter 单笔市价对冲的价格偏离为 0.5%；`--target-timeout` 默认允许每个目标仓位最多等待 600 秒。程序退出时不会自动撤销未确认订单或强制平仓，需人工核对两个账户。
+`--size` 是每笔 maker 订单的标的数量；`--iter` 是循环次数。默认 `--max-position 0` 时，每轮从零仓位买入并对冲，再卖出回零。设置正值后，maker 仓位逐笔累积到 `+max-position`，再逐笔反向到 `-max-position`；最后一轮结束后回到零，两腿始终保持反向。`max-position` 必须是 `size` 的整数倍。`--max-slippage` 默认限制 Lighter 单笔市价对冲的价格偏离为 0.5%；`--target-timeout` 默认允许每个目标仓位最多等待 600 秒；`--recovery-timeout` 默认允许订单恢复核对 15 秒。程序退出时不会自动撤销未确认订单或强制平仓，需人工核对两个账户。
 
 ## 主要参数与风险
 

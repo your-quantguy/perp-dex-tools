@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
-from exchanges.base import OrderInfo, OrderResult
+from exchanges.base import OrderInfo, OrderOutcomeUnknown, OrderResult
 from exchanges.lighter import LighterClient
 from hedge_mode import HedgeBot, HedgeConfig
 
@@ -128,6 +128,22 @@ class HedgeModeTests(unittest.IsolatedAsyncioTestCase):
                      maker, FakeLighter())
         self.assertEqual(maker.orders, [])
 
+    async def test_transient_position_read_recovers_before_new_order(self):
+        bot, maker, lighter = self.make_bot()
+        cast(Any, maker).get_account_positions = AsyncMock(side_effect=[
+            ConnectionError("temporary account read failure"), Decimal(0),
+        ])
+        self.assertEqual(await bot._positions(), Decimal(0))
+        self.assertEqual(lighter.orders, [])
+
+    async def test_position_mismatch_stops_after_recovery_window(self):
+        bot, maker, lighter = self.make_bot()
+        maker.position = Decimal("0.1")
+        bot.config.recovery_timeout = 0.001
+        with self.assertRaisesRegex(RuntimeError, "Unmatched or unreadable positions"):
+            await bot._positions()
+        self.assertEqual(lighter.orders, [])
+
     async def test_max_position_accumulates_then_reverses_and_flattens(self):
         bot, maker, lighter = self.make_bot(Decimal("0.2"))
         await bot.run()
@@ -162,6 +178,129 @@ class HedgeModeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "unknown ACK"):
             await bot._execute_maker_order("buy", Decimal("0.1"), Decimal(0), False)
         self.assertEqual(maker.cancels, ["1"])
+        lighter.place_hedge_market_order.assert_awaited_once()
+
+    async def test_lost_maker_ack_with_order_id_recovers_confirmed_fill(self):
+        bot, maker, lighter = self.make_bot()
+        original_place = maker.place_open_order
+
+        async def lose_ack(contract_id, quantity, side):
+            result = await original_place(contract_id, quantity, side)
+            raise OrderOutcomeUnknown("Bulk ACK lost", result.order_id)
+
+        maker.place_open_order = lose_ack
+        filled = await bot._execute_maker_order("buy", Decimal("0.1"), Decimal(0), False)
+        self.assertEqual(filled, Decimal("0.1"))
+        self.assertEqual(lighter.position, Decimal("-0.1"))
+        self.assertEqual(len(maker.orders), 1)
+
+    async def test_transient_maker_read_recovers_without_new_order(self):
+        bot, maker, lighter = self.make_bot()
+        original_read = maker.get_order_info
+        reads = 0
+
+        async def flaky_read(order_id):
+            nonlocal reads
+            reads += 1
+            if reads == 1:
+                raise ConnectionError("temporary read failure")
+            return await original_read(order_id)
+
+        cast(Any, maker).get_order_info = flaky_read
+        filled = await bot._execute_maker_order("buy", Decimal("0.1"), Decimal(0), False)
+        self.assertEqual(filled, Decimal("0.1"))
+        self.assertEqual(lighter.position, Decimal("-0.1"))
+        self.assertEqual(len(maker.orders), 1)
+
+    async def test_lost_maker_ack_without_order_id_stops_without_resubmitting(self):
+        bot, maker, lighter = self.make_bot(exchange="arcus")
+        maker.place_open_order = AsyncMock(side_effect=OrderOutcomeUnknown("Arcus client ID only"))
+        with self.assertRaisesRegex(OrderOutcomeUnknown, "client ID only"):
+            await bot._execute_maker_order("buy", Decimal("0.1"), Decimal(0), False)
+        maker.place_open_order.assert_awaited_once()
+        self.assertEqual(lighter.orders, [])
+
+    async def test_lost_cancel_ack_recovers_late_partial_fill(self):
+        bot, maker, lighter = self.make_bot()
+        maker.place_open_order = AsyncMock(return_value=OrderResult(
+            True, "partial", "buy", Decimal("0.1"), Decimal(100), "OPEN", filled_size=Decimal(0),
+        ))
+        maker.position = Decimal("0.04")
+        canceled = False
+
+        async def read_order(_order_id):
+            return OrderInfo("partial", "buy", Decimal("0.1"), Decimal(100),
+                             "CANCELED" if canceled else "PARTIALLY_FILLED",
+                             filled_size=Decimal("0.04"), remaining_size=Decimal("0.06"))
+
+        async def lose_cancel_ack(_order_id):
+            nonlocal canceled
+            canceled = True
+            raise ConnectionError("cancel ACK lost")
+
+        cast(Any, maker).get_order_info = read_order
+        cancel_mock = AsyncMock(side_effect=lose_cancel_ack)
+        cast(Any, maker).cancel_order = cancel_mock
+        bot.config.fill_timeout = 0.001
+        filled = await bot._execute_maker_order("buy", Decimal("0.1"), Decimal(0), False)
+        self.assertEqual(filled, Decimal("0.04"))
+        self.assertEqual(lighter.orders, [("sell", Decimal("0.04"), False)])
+        cancel_mock.assert_awaited_once_with("partial")
+
+    async def test_unconfirmed_maker_terminal_stops_without_another_order(self):
+        bot, maker, lighter = self.make_bot()
+        bot.config.fill_timeout = 0.001
+        bot.config.recovery_timeout = 0.001
+        maker.place_open_order = AsyncMock(return_value=OrderResult(
+            True, "stuck", "buy", Decimal("0.1"), Decimal(100), "OPEN", filled_size=Decimal(0),
+        ))
+        cast(Any, maker).get_order_info = AsyncMock(return_value=OrderInfo(
+            "stuck", "buy", Decimal("0.1"), Decimal(100), "OPEN",
+            filled_size=Decimal(0), remaining_size=Decimal("0.1"),
+        ))
+        cast(Any, maker).cancel_order = AsyncMock(return_value=OrderResult(
+            True, "stuck", filled_size=Decimal(0),
+        ))
+        with self.assertRaisesRegex(RuntimeError, "terminal state is unconfirmed"):
+            await bot._execute_maker_order("buy", Decimal("0.1"), Decimal(0), False)
+        maker.place_open_order.assert_awaited_once()
+        self.assertEqual(lighter.orders, [])
+
+    async def test_lost_lighter_ack_recovers_confirmed_target_without_resubmission(self):
+        bot, _, lighter = self.make_bot()
+
+        async def lose_ack(quantity, side, max_slippage_percent, reduce_only=False):
+            lighter.position -= quantity
+            raise OrderOutcomeUnknown("Lighter ACK lost", "123")
+
+        lighter.place_hedge_market_order = AsyncMock(side_effect=lose_ack)
+        await bot._hedge_to(Decimal("-0.1"))
+        self.assertEqual(lighter.position, Decimal("-0.1"))
+        lighter.place_hedge_market_order.assert_awaited_once()
+
+    async def test_transient_lighter_position_read_recovers_before_hedge(self):
+        bot, _, lighter = self.make_bot()
+        original_read = lighter.get_account_positions
+        reads = 0
+
+        async def flaky_read():
+            nonlocal reads
+            reads += 1
+            if reads == 1:
+                raise ConnectionError("temporary position read failure")
+            return await original_read()
+
+        cast(Any, lighter).get_account_positions = flaky_read
+        await bot._hedge_to(Decimal("-0.1"))
+        self.assertEqual(lighter.position, Decimal("-0.1"))
+        self.assertEqual(len(lighter.orders), 1)
+
+    async def test_lost_lighter_ack_without_target_stops_without_resubmission(self):
+        bot, _, lighter = self.make_bot()
+        bot.config.recovery_timeout = 0.001
+        lighter.place_hedge_market_order = AsyncMock(side_effect=OrderOutcomeUnknown("ACK lost", "123"))
+        with self.assertRaisesRegex(RuntimeError, "not fully confirmed"):
+            await bot._hedge_to(Decimal("-0.1"))
         lighter.place_hedge_market_order.assert_awaited_once()
 
     async def test_telegram_notification_remains_available(self):

@@ -18,7 +18,7 @@ import aiohttp
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from .base import BaseExchangeClient, OrderInfo, OrderResult
+from .base import BaseExchangeClient, OrderInfo, OrderOutcomeUnknown, OrderResult
 
 logger = logging.getLogger(__name__)
 TERMINAL = {"FILLED", "CANCELED", "REJECTED"}
@@ -420,17 +420,17 @@ class ArcusClient(BaseExchangeClient):
             if exc.status < 500:
                 self._clients.discard(cid)
                 return OrderResult(False, error_message=str(exc), filled_size=Decimal(0))
-            raise RuntimeError(f"Arcus submit outcome is unknown for clientId {cid}") from exc
+            raise OrderOutcomeUnknown(f"Arcus submit outcome is unknown for clientId {cid}") from exc
         except Exception as exc:
-            raise RuntimeError(f"Arcus submit outcome is unknown for clientId {cid}") from exc
+            raise OrderOutcomeUnknown(f"Arcus submit outcome is unknown for clientId {cid}") from exc
         oid = ack.get("orderId")
         if not oid:
-            raise RuntimeError(f"Arcus submit outcome is unknown for clientId {cid}: missing orderId")
+            raise OrderOutcomeUnknown(f"Arcus submit outcome is unknown for clientId {cid}: missing orderId")
         self._tracked.add(oid)
         try:
             order = await self._confirm(oid, LIVE | TERMINAL)
         except Exception as exc:
-            raise RuntimeError(f"Arcus submit outcome is unknown for {oid}: {exc}") from exc
+            raise OrderOutcomeUnknown(f"Arcus submit outcome is unknown for {oid}: {exc}", oid) from exc
         if order.status in TERMINAL:
             self._clients.discard(cid)
         return OrderResult(order.status in LIVE | {"FILLED"}, oid, side, quantity, price,

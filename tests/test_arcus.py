@@ -8,7 +8,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 from exchanges.arcus import ArcusAPIError, ArcusClient
-from exchanges.base import OrderInfo, OrderResult
+from exchanges.base import OrderInfo, OrderOutcomeUnknown, OrderResult
 from exchanges.factory import ExchangeFactory
 from tests import test_bulk_bot
 import aiohttp
@@ -245,14 +245,16 @@ class ArcusTests(unittest.IsolatedAsyncioTestCase):
     async def test_ack_is_not_success_until_confirmed(self):
         self.client._request = AsyncMock(return_value={"orderId": "new", "status": "ACK"})
         self.client._confirm = AsyncMock(side_effect=ValueError("bad state"))
-        with self.assertRaisesRegex(RuntimeError, "outcome is unknown"):
+        with self.assertRaisesRegex(OrderOutcomeUnknown, "outcome is unknown") as caught:
             await self.client._place(Decimal("0.02"), Decimal("2700.01"), "buy", False)
+        self.assertEqual(caught.exception.order_id, "new")
         self.client._request.assert_awaited_once()
 
     async def test_submit_timeout_not_retried(self):
         self.client._request = AsyncMock(side_effect=TimeoutError())
-        with self.assertRaisesRegex(RuntimeError, "outcome is unknown"):
+        with self.assertRaisesRegex(OrderOutcomeUnknown, "outcome is unknown") as caught:
             await self.client._place(Decimal("0.02"), Decimal("2700.01"), "buy", False)
+        self.assertIsNone(caught.exception.order_id)
         self.client._request.assert_awaited_once()
 
     async def test_rejection_and_reduce_only_dust(self):
