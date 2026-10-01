@@ -600,9 +600,10 @@ class BulkClient(BaseExchangeClient):
     async def cancel_order(self, order_id: str) -> OrderResult:
         order = await self.get_order_info(order_id)
         if order is None:
-            raise RuntimeError(f"Bulk order {order_id} cannot be located for cancellation")
+            raise OrderOutcomeUnknown(f"Bulk order {order_id} cannot be located for cancellation", order_id)
         if order.status in {"FILLED", "CANCELED"}:
-            return OrderResult(True, order_id, filled_size=order.filled_size)
+            return OrderResult(True, order_id, order.side, order.size, order.price,
+                               order.status, filled_size=order.filled_size)
         await self._wait_market_ready()
         try:
             signed = self._sign_action({
@@ -629,7 +630,8 @@ class BulkClient(BaseExchangeClient):
                 account = await self._account()
                 latest = self._orders.get(order_id, order)
                 if latest.status in {"FILLED", "CANCELED"}:
-                    return OrderResult(True, order_id, filled_size=latest.filled_size)
+                    return OrderResult(True, order_id, latest.side, latest.size, latest.price,
+                                       latest.status, filled_size=latest.filled_size)
                 if any(
                     str(raw.get("openOrder", raw).get("oid")
                         or raw.get("openOrder", raw).get("orderId") or "") == order_id
@@ -644,16 +646,18 @@ class BulkClient(BaseExchangeClient):
                 filled = await self._filled_size_from_history(order_id)
                 latest = self._orders.get(order_id, order)
                 if latest.status in {"FILLED", "CANCELED"}:
-                    return OrderResult(True, order_id, filled_size=latest.filled_size)
+                    return OrderResult(True, order_id, latest.side, latest.size, latest.price,
+                                       latest.status, filled_size=latest.filled_size)
                 if filled > latest.size:
                     raise RuntimeError(f"Bulk fills exceed original size for order {order_id}")
                 latest.filled_size = max(latest.filled_size, filled)
                 latest.status = "FILLED" if latest.filled_size == latest.size else "CANCELED"
                 self._remember(latest)
             stored = self._orders[order_id]
-            return OrderResult(True, order_id, filled_size=stored.filled_size)
+            return OrderResult(True, order_id, stored.side, stored.size, stored.price,
+                               stored.status, filled_size=stored.filled_size)
         except Exception as exc:
-            raise RuntimeError(f"Bulk cancel outcome is unknown: {exc}") from exc
+            raise OrderOutcomeUnknown(f"Bulk cancel outcome is unknown: {exc}", order_id) from exc
 
     async def _filled_size_from_history(self, order_id: str) -> Decimal:
         """Read authoritative fills only when a cancel event was missed."""

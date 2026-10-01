@@ -7,7 +7,8 @@ import asyncio
 import time
 import logging
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
-from typing import TYPE_CHECKING, Dict, Any, List, Optional, Tuple, cast
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Dict, Any, List, Optional, Tuple
 
 from .base import BaseExchangeClient, ExchangeConfig, MarketId, OrderOutcomeUnknown, OrderResult, OrderInfo, query_retry
 from helpers.logger import TradingLogger
@@ -17,7 +18,7 @@ from lighter.api.account_api import AccountApi
 from lighter.api.order_api import OrderApi
 from lighter.api_client import ApiClient
 from lighter.configuration import Configuration
-from lighter.signer_client import SignerClient
+from lighter.signer_client import CODE_OK, SignerClient
 
 if TYPE_CHECKING:
     from lighter.models.account_position import AccountPosition
@@ -36,6 +37,8 @@ if root_logger.level == logging.DEBUG:
 
 class LighterClient(BaseExchangeClient):
     """Lighter exchange client implementation."""
+
+    ORDER_CONFIRM_TIMEOUT = 10
 
     def __init__(self, config: ExchangeConfig):
         """Initialize Lighter client."""
@@ -125,23 +128,30 @@ class LighterClient(BaseExchangeClient):
     async def _initialize_lighter_client(self):
         """Initialize the Lighter client using official SDK."""
         if self.lighter_client is None:
+            signer = None
             try:
                 private_key = self.api_key_private_key
                 if private_key is None:
                     raise ValueError("API_KEY_PRIVATE_KEY must be set")
-                self.lighter_client = SignerClient(
+                signer = SignerClient(
                     url=self.base_url,
                     account_index=self.account_index,
                     api_private_keys={self.api_key_index: private_key}
                 )
 
                 # Check client
-                err = self.lighter_client.check_client()
+                err = signer.check_client()
                 if err is not None:
                     raise Exception(f"CheckClient error: {err}")
 
+                self.lighter_client = signer
                 self.logger.log("Lighter client initialized successfully", "INFO")
             except Exception as e:
+                if signer is not None:
+                    try:
+                        await signer.close()
+                    except Exception as close_error:
+                        self.logger.log(f"Error closing failed Lighter signer: {close_error}", "ERROR")
                 self.logger.log(f"Failed to initialize Lighter client: {e}", "ERROR")
                 raise
         return self.lighter_client
@@ -181,13 +191,16 @@ class LighterClient(BaseExchangeClient):
         try:
             if hasattr(self, 'ws_manager') and self.ws_manager:
                 await self.ws_manager.disconnect()
-
-            # Close shared API client
-            if self.api_client:
-                await self.api_client.close()
-                self.api_client = None
         except Exception as e:
-            self.logger.log(f"Error during Lighter disconnect: {e}", "ERROR")
+            self.logger.log(f"Error disconnecting Lighter WebSocket: {e}", "ERROR")
+        for attr in ("api_client", "lighter_client"):
+            client = getattr(self, attr, None)
+            if client is not None:
+                try:
+                    await client.close()
+                except Exception as e:
+                    self.logger.log(f"Error closing Lighter {attr}: {e}", "ERROR")
+                setattr(self, attr, None)
 
     def get_exchange_name(self) -> str:
         """Get the exchange name."""
@@ -197,63 +210,65 @@ class LighterClient(BaseExchangeClient):
         """Setup order update handler for WebSocket."""
         self._order_update_handler = handler
 
+    @staticmethod
+    def _order_status(raw_status: str, filled: Decimal) -> str:
+        status = raw_status.lower().replace("_", "-")
+        if status == "filled":
+            return "FILLED"
+        if status.startswith("canceled"):
+            return "CANCELED"
+        if status in {"open", "pending", "in-progress"}:
+            return "PARTIALLY_FILLED" if filled > 0 else "OPEN"
+        raise ValueError(f"Unsupported Lighter order status: {raw_status}")
+
+    @classmethod
+    def _order_info(cls, raw: Any) -> OrderInfo:
+        size = Decimal(raw.initial_base_amount)
+        filled = Decimal(raw.filled_base_amount)
+        reported_remaining = Decimal(raw.remaining_base_amount)
+        if (not all(value.is_finite() for value in (size, filled, reported_remaining))
+                or size <= 0 or filled < 0 or filled > size
+                or reported_remaining < 0 or reported_remaining > size):
+            raise ValueError("Lighter order quantities are inconsistent")
+        return OrderInfo(
+            order_id=str(raw.client_order_index),
+            side="sell" if raw.is_ask else "buy",
+            size=size,
+            price=Decimal(raw.price),
+            status=cls._order_status(raw.status, filled),
+            filled_size=filled,
+            remaining_size=size - filled,
+            cancel_reason=raw.status if raw.status.lower().startswith("canceled") else "",
+        )
+
     def _handle_websocket_order_update(self, order_data_list: List[Dict[str, Any]]):
         """Handle order updates from WebSocket."""
         for order_data in order_data_list:
             if order_data['market_index'] != self.config.contract_id:
                 continue
-
-            side = 'sell' if order_data['is_ask'] else 'buy'
-            if side == self.config.close_order_side:
-                order_type = "CLOSE"
+            order = self._order_info(SimpleNamespace(**order_data))
+            order_id = order.order_id
+            order_type = "CLOSE" if order.side == self.config.close_order_side else "OPEN"
+            previous = self.orders_cache.get(order_id)
+            if previous == (order.status, order.filled_size):
+                continue
+            if order.status in {"FILLED", "CANCELED"}:
+                self.orders_cache.pop(order_id, None)
             else:
-                order_type = "OPEN"
-
-            order_id = order_data['order_index']
-            status = order_data['status'].upper()
-            filled_size = Decimal(order_data['filled_base_amount'])
-            size = Decimal(order_data['initial_base_amount'])
-            price = Decimal(order_data['price'])
-            remaining_size = Decimal(order_data['remaining_base_amount'])
-
-            if order_id in self.orders_cache.keys():
-                if (self.orders_cache[order_id]['status'] == 'OPEN' and
-                        status == 'OPEN' and
-                        filled_size == self.orders_cache[order_id]['filled_size']):
-                    continue
-                elif status in ['FILLED', 'CANCELED']:
-                    del self.orders_cache[order_id]
-                else:
-                    self.orders_cache[order_id]['status'] = status
-                    self.orders_cache[order_id]['filled_size'] = filled_size
-            elif status == 'OPEN':
-                self.orders_cache[order_id] = {'status': status, 'filled_size': filled_size}
-
-            if status == 'OPEN' and filled_size > 0:
-                status = 'PARTIALLY_FILLED'
-
-            if status == 'OPEN':
-                self.logger.log(f"[{order_type}] [{order_id}] {status} "
-                                f"{size} @ {price}", "INFO")
-            else:
-                self.logger.log(f"[{order_type}] [{order_id}] {status} "
-                                f"{filled_size} @ {price}", "INFO")
-
-            if order_data['client_order_index'] == self.current_order_client_id or order_type == 'OPEN':
-                current_order = OrderInfo(
-                    order_id=order_id,
-                    side=side,
-                    size=size,
-                    price=price,
-                    status=status,
-                    filled_size=filled_size,
-                    remaining_size=remaining_size,
-                    cancel_reason=''
-                )
-                self.current_order = current_order
-
-            if status in ['FILLED', 'CANCELED']:
-                self.logger.log_transaction(order_id, side, filled_size, price, status)
+                self.orders_cache[order_id] = (order.status, order.filled_size)
+            self.logger.log(f"[{order_type}] [{order_id}] {order.status} "
+                            f"{order.filled_size} @ {order.price}", "INFO")
+            if str(order_data['client_order_index']) == str(self.current_order_client_id):
+                self.current_order = order
+            if self._order_update_handler is not None:
+                self._order_update_handler({
+                    "contract_id": self.config.contract_id, "order_id": order_id,
+                    "side": order.side, "order_type": order_type, "status": order.status,
+                    "size": order.size, "price": order.price,
+                    "filled_size": order.filled_size,
+                })
+            if order.status in {"FILLED", "CANCELED"}:
+                self.logger.log_transaction(order_id, order.side, order.filled_size, order.price, order.status)
 
     @query_retry(default_return=(0, 0))
     async def fetch_bbo_prices(self, contract_id: MarketId) -> Tuple[Decimal, Decimal]:
@@ -274,7 +289,7 @@ class LighterClient(BaseExchangeClient):
         return best_bid, best_ask
 
     async def _submit_order_with_retry(self, order_params: Dict[str, Any]) -> OrderResult:
-        """Submit an order with Lighter using official SDK."""
+        """Return only a confirmed SDK submission response."""
         # Ensure client is initialized
         if self.lighter_client is None:
             # This is a sync method, so we need to handle this differently
@@ -282,18 +297,29 @@ class LighterClient(BaseExchangeClient):
             raise ValueError("Lighter client not initialized. Call connect() first.")
 
         # Create order using official SDK
-        create_order, tx_hash, error = await self.lighter_client.create_order(**order_params)
+        client_id = str(order_params['client_order_index'])
+        try:
+            _, response, error = await self.lighter_client.create_order(**order_params)
+        except Exception as exc:
+            raise OrderOutcomeUnknown(f"Lighter submit outcome is unknown for {client_id}", client_id) from exc
         if error is not None:
             return OrderResult(
-                success=False, order_id=str(order_params['client_order_index']),
+                success=False, order_id=client_id,
                 error_message=f"Order creation error: {error}")
+        if response is None:
+            raise OrderOutcomeUnknown(f"Lighter submit outcome is unknown for {client_id}", client_id)
+        if response.code != CODE_OK:
+            return OrderResult(False, client_id, error_message=getattr(response, "message", "Lighter rejected order"))
+        return OrderResult(True, client_id, status="SUBMITTED")
 
-        else:
-            return OrderResult(success=True, order_id=str(order_params['client_order_index']))
+    def _next_client_order_index(self) -> int:
+        index = max(time.time_ns() // 1_000_000, getattr(self, "_last_client_order_index", 0) + 1)
+        self._last_client_order_index = index
+        return index
 
     async def place_limit_order(self, contract_id: MarketId, quantity: Decimal, price: Decimal,
-                                side: str) -> OrderResult:
-        """Place a post only order with Lighter using official SDK."""
+                                side: str, reduce_only: bool = False) -> OrderResult:
+        """Place a good-till-time limit order with Lighter using the official SDK."""
         # Ensure client is initialized
         if self.lighter_client is None:
             await self._initialize_lighter_client()
@@ -307,7 +333,7 @@ class LighterClient(BaseExchangeClient):
             raise Exception(f"Invalid side: {side}")
 
         # Generate unique client order index
-        client_order_index = int(time.time() * 1000) % 1000000  # Simple unique ID
+        client_order_index = self._next_client_order_index()
         self.current_order_client_id = client_order_index
         base_multiplier, price_multiplier = self._multipliers()
         signer = self._signer()
@@ -321,12 +347,32 @@ class LighterClient(BaseExchangeClient):
             'is_ask': is_ask,
             'order_type': signer.ORDER_TYPE_LIMIT,
             'time_in_force': signer.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME,
-            'reduce_only': False,
+            'reduce_only': reduce_only,
             'trigger_price': 0,
         }
 
         order_result = await self._submit_order_with_retry(order_params)
         return order_result
+
+    async def _wait_for_order(self, order_id: str, timeout: float) -> OrderInfo:
+        deadline = time.monotonic() + timeout
+        last_error: Exception | None = None
+        while time.monotonic() < deadline:
+            current = self.current_order
+            if current is not None and current.order_id == order_id:
+                return current
+            try:
+                order = await self.get_order_info(order_id)
+            except Exception as exc:
+                last_error = exc
+            else:
+                if order is not None:
+                    self.current_order = order
+                    return order
+            await asyncio.sleep(0.25)
+        raise OrderOutcomeUnknown(
+            f"Lighter order {order_id} was accepted but not found: {last_error}", order_id,
+        )
 
     async def place_open_order(self, contract_id: MarketId, quantity: Decimal, direction: str) -> OrderResult:
         """Place an open order with Lighter using official SDK."""
@@ -338,26 +384,20 @@ class LighterClient(BaseExchangeClient):
         order_price = self.round_to_tick(order_price)
         order_result = await self.place_limit_order(contract_id, quantity, order_price, direction)
         if not order_result.success:
-            raise Exception(f"[OPEN] Error placing order: {order_result.error_message}")
-
-        start_time = time.time()
-        order_status = 'OPEN'
-
-        # While waiting for order to be filled
-        while time.time() - start_time < 10 and order_status != 'FILLED':
-            await asyncio.sleep(0.1)
-            if self.current_order is not None:
-                order_status = self.current_order.status
-
-        if self.current_order is None:
-            raise RuntimeError("Lighter order acknowledgement was not observed")
+            return order_result
+        if order_result.order_id is None:
+            raise OrderOutcomeUnknown("Lighter submit succeeded without a client order ID")
+        order = await self._wait_for_order(order_result.order_id, self.ORDER_CONFIRM_TIMEOUT)
+        accepted = order.status != "CANCELED" or order.filled_size > 0
         return OrderResult(
-            success=True,
-            order_id=self.current_order.order_id,
+            success=accepted,
+            order_id=order.order_id,
             side=direction,
             size=quantity,
             price=order_price,
-            status=self.current_order.status
+            status=order.status,
+            error_message=order.cancel_reason or None,
+            filled_size=order.filled_size,
         )
 
     async def _get_active_close_orders(self, contract_id: MarketId) -> int:
@@ -373,21 +413,14 @@ class LighterClient(BaseExchangeClient):
         """Place a close order with Lighter using official SDK."""
         self.current_order = None
         self.current_order_client_id = None
-        order_result = await self.place_limit_order(contract_id, quantity, price, side)
-
-        # wait for 5 seconds to ensure order is placed
-        await asyncio.sleep(5)
-        if order_result.success:
-            return OrderResult(
-                success=True,
-                order_id=order_result.order_id,
-                side=side,
-                size=quantity,
-                price=price,
-                status='OPEN'
-            )
-        else:
-            raise Exception(f"[CLOSE] Error placing order: {order_result.error_message}")
+        order_result = await self.place_limit_order(contract_id, quantity, price, side, reduce_only=True)
+        if not order_result.success:
+            return order_result
+        if order_result.order_id is None:
+            raise OrderOutcomeUnknown("Lighter close submit succeeded without a client order ID")
+        order = await self._wait_for_order(order_result.order_id, self.ORDER_CONFIRM_TIMEOUT)
+        return OrderResult(order.status != "CANCELED", order.order_id, side, quantity, price,
+                           order.status, order.cancel_reason or None, order.filled_size)
 
     async def place_hedge_market_order(self, quantity: Decimal, side: str,
                                        max_slippage_percent: Decimal,
@@ -414,8 +447,7 @@ class LighterClient(BaseExchangeClient):
         price_units = (price * price_multiplier).to_integral_value(rounding=rounding)
         if price_units <= 0:
             raise ValueError("Invalid Lighter hedge price")
-        self._hedge_order_index = (self._hedge_order_index + 1) % 2_000_000_000
-        order_index = self._hedge_order_index
+        order_index = self._next_client_order_index()
         try:
             _, response, error = await self._signer().create_market_order(
                 market_index=self._market_id(),
@@ -430,7 +462,9 @@ class LighterClient(BaseExchangeClient):
             raise OrderOutcomeUnknown(f"Lighter hedge submission outcome is unknown for {order_index}", str(order_index)) from exc
         if error is not None:
             return OrderResult(False, str(order_index), error_message=str(error))
-        if response is None or response.code != 0:
+        if response is None:
+            raise OrderOutcomeUnknown(f"Lighter hedge submission outcome is unknown for {order_index}", str(order_index))
+        if response.code != CODE_OK:
             return OrderResult(False, str(order_index),
                                error_message=getattr(response, "message", "Lighter rejected hedge order"))
         return OrderResult(True, str(order_index), side, quantity, price, "SUBMITTED")
@@ -456,50 +490,72 @@ class LighterClient(BaseExchangeClient):
         return order_price
 
     async def cancel_order(self, order_id: str) -> OrderResult:
-        """Cancel an order with Lighter."""
-        # Ensure client is initialized
-        if self.lighter_client is None:
-            await self._initialize_lighter_client()
-
-        # Cancel order using official SDK
-        cancel_order, tx_hash, error = await self._signer().cancel_order(
-            market_index=self._market_id(),
-            order_index=int(order_id)  # Assuming order_id is the order index
-        )
-
-        if error is not None:
-            return OrderResult(success=False, error_message=f"Cancel order error: {error}")
-
-        if tx_hash:
-            return OrderResult(success=True)
-        else:
-            return OrderResult(success=False, error_message='Failed to send cancellation transaction')
+        """Cancel by client order ID and return the confirmed terminal fill."""
+        raw = await self._fetch_order_by_client_id(order_id)
+        if raw is None:
+            raise OrderOutcomeUnknown(f"Lighter order {order_id} is absent from available history", order_id)
+        order = self._order_info(raw)
+        if order.status not in {"FILLED", "CANCELED"}:
+            cancel_error: Exception | None = None
+            try:
+                _, response, error = await self._signer().cancel_order(
+                    market_index=self._market_id(),
+                    order_index=raw.order_index,
+                    api_key_index=self.api_key_index,
+                )
+            except Exception as exc:
+                cancel_error = exc
+            else:
+                if error is not None:
+                    cancel_error = RuntimeError(str(error))
+                elif response is None:
+                    cancel_error = RuntimeError("No Lighter cancel response")
+                elif response.code != CODE_OK:
+                    cancel_error = RuntimeError(getattr(response, "message", "Lighter rejected cancellation"))
+            deadline = time.monotonic() + self.ORDER_CONFIRM_TIMEOUT
+            last_read_error: Exception | None = None
+            while True:
+                try:
+                    raw = await self._fetch_order_by_client_id(order_id)
+                except Exception as exc:
+                    last_read_error = exc
+                else:
+                    if raw is not None:
+                        order = self._order_info(raw)
+                        if order.status in {"FILLED", "CANCELED"}:
+                            break
+                if time.monotonic() >= deadline:
+                    raise OrderOutcomeUnknown(
+                        f"Lighter cancel terminal state is unknown for {order_id}: "
+                        f"cancel_error={cancel_error}, read_error={last_read_error}", order_id,
+                    )
+                await asyncio.sleep(0.25)
+        return OrderResult(True, order_id, order.side, order.size, order.price,
+                           order.status, filled_size=order.filled_size)
 
     async def get_order_info(self, order_id: str) -> Optional[OrderInfo]:
-        """Get order information from Lighter using official SDK."""
-        try:
-            account_api = AccountApi(self.api_client)
-            account_data = cast(Any, await account_api.account(by="index", value=str(self.account_index)))
+        """Query a specific client order ID; position size is never an order state."""
+        raw = await self._fetch_order_by_client_id(order_id)
+        return self._order_info(raw) if raw is not None else None
 
-            for position in account_data.positions:
-                if position.symbol == self.config.ticker:
-                    position_amt = abs(float(position.position))
-                    if position_amt > 0.001:
-                        return OrderInfo(
-                            order_id=order_id,
-                            side="buy" if float(position.position) > 0 else "sell",
-                            size=Decimal(str(position_amt)),
-                            price=Decimal(str(position.avg_price)),
-                            status="FILLED",
-                            filled_size=Decimal(str(position_amt)),
-                            remaining_size=Decimal(0),
-                        )
+    def _auth_token(self) -> str:
+        token, error = self._signer().create_auth_token_with_expiry(api_key_index=self.api_key_index)
+        if error is not None or not token:
+            raise ValueError(f"Error creating Lighter auth token: {error or 'empty token'}")
+        return token
 
-            return None
-
-        except Exception as e:
-            self.logger.log(f"Error getting order info: {e}", "ERROR")
-            return None
+    @query_retry(reraise=True)
+    async def _fetch_order_by_client_id(self, order_id: str) -> Any | None:
+        response = await OrderApi(self.api_client).account_orders(
+            authorization=self._auth_token(), client_order_indexes=order_id,
+            account_index=self.account_index,
+        )
+        if response is None or response.orders is None:
+            raise ValueError("Lighter returned an invalid order response")
+        for raw in response.orders:
+            if str(raw.client_order_index) == order_id and raw.market_index == self._market_id():
+                return raw
+        return None
 
     @query_retry(reraise=True)
     async def _fetch_orders_with_retry(self) -> List["Order"]:
@@ -509,10 +565,7 @@ class LighterClient(BaseExchangeClient):
             await self._initialize_lighter_client()
 
         # Generate auth token for API call
-        auth_token, error = self._signer().create_auth_token_with_expiry(api_key_index=self.api_key_index)
-        if error is not None:
-            self.logger.log(f"Error creating auth token: {error}", "ERROR")
-            raise ValueError(f"Error creating auth token: {error}")
+        auth_token = self._auth_token()
 
         # Use OrderApi to get active orders
         order_api = OrderApi(self.api_client)
@@ -521,10 +574,10 @@ class LighterClient(BaseExchangeClient):
         orders_response = await order_api.account_active_orders(
             account_index=self.account_index,
             market_id=self._market_id(),
-            auth=auth_token
+            authorization=auth_token,
         )
 
-        if not orders_response:
+        if orders_response is None or orders_response.orders is None:
             self.logger.log("Failed to get orders", "ERROR")
             raise ValueError("Failed to get orders")
 
@@ -532,29 +585,12 @@ class LighterClient(BaseExchangeClient):
 
     async def get_active_orders(self, contract_id: MarketId) -> List[OrderInfo]:
         """Get active orders for a contract using official SDK."""
+        if contract_id != self._market_id():
+            raise ValueError("Lighter contract does not match configured market")
         order_list = await self._fetch_orders_with_retry()
-
-        # Filter orders for the specific market
-        contract_orders = []
-        for order in order_list:
-            # Convert Lighter Order to OrderInfo
-            side = "sell" if order.is_ask else "buy"
-            size = Decimal(order.initial_base_amount)
-            price = Decimal(order.price)
-
-            # Only include orders with remaining size > 0
-            if size > 0:
-                contract_orders.append(OrderInfo(
-                    order_id=str(order.order_index),
-                    side=side,
-                    size=Decimal(order.remaining_base_amount),  # FIXME: This is wrong. Should be size
-                    price=price,
-                    status=order.status.upper(),
-                    filled_size=Decimal(order.filled_base_amount),
-                    remaining_size=Decimal(order.remaining_base_amount)
-                ))
-
-        return contract_orders
+        orders = [self._order_info(raw) for raw in order_list if raw.market_index == contract_id]
+        return [order for order in orders if order.status in {"OPEN", "PARTIALLY_FILLED"}
+                and order.remaining_size > 0]
 
     @query_retry(reraise=True)
     async def _fetch_positions_with_retry(self) -> List["AccountPosition"]:

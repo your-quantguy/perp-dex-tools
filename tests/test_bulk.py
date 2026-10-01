@@ -259,6 +259,7 @@ class BulkClientTests(unittest.IsolatedAsyncioTestCase):
         self.client._post_signed = post
         result = await self.client.cancel_order("entry")
         self.assertTrue(result.success)
+        self.assertEqual(result.status, "CANCELED")
         self.assertEqual(result.filled_size, Decimal("0.4"))
         self.assertEqual(events[-1]["status"], "CANCELED")
         self.assertEqual(events[-1]["filled_size"], "0.4")

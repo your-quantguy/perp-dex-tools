@@ -18,11 +18,12 @@ import aiohttp
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from .base import BaseExchangeClient, OrderInfo, OrderOutcomeUnknown, OrderResult
+from .base import (BaseExchangeClient, LIVE_ORDER_STATUSES, OrderInfo,
+                   OrderOutcomeUnknown, OrderResult, TERMINAL_ORDER_STATUSES)
 
 logger = logging.getLogger(__name__)
-TERMINAL = {"FILLED", "CANCELED", "REJECTED"}
-LIVE = {"OPEN", "PARTIALLY_FILLED"}
+TERMINAL = TERMINAL_ORDER_STATUSES
+LIVE = LIVE_ORDER_STATUSES
 
 
 class ArcusAPIError(Exception):
@@ -457,7 +458,7 @@ class ArcusClient(BaseExchangeClient):
     async def cancel_order(self, order_id):
         order = await self.get_order_info(order_id)
         if order is None:
-            raise RuntimeError(f"Arcus cancel outcome is unknown for {order_id}")
+            raise OrderOutcomeUnknown(f"Arcus cancel outcome is unknown for {order_id}", order_id)
         if order.status not in TERMINAL:
             await self._wait_ready()
             ts = self._timestamp()
@@ -474,7 +475,7 @@ class ArcusClient(BaseExchangeClient):
             try:
                 order = await self._confirm(order_id, TERMINAL)
             except Exception as exc:
-                raise RuntimeError(f"Arcus cancel outcome is unknown for {order_id}: {exc}") from exc
+                raise OrderOutcomeUnknown(f"Arcus cancel outcome is unknown for {order_id}: {exc}", order_id) from exc
         return OrderResult(True, order_id, order.side, order.size, order.price,
                            order.status, filled_size=order.filled_size)
 

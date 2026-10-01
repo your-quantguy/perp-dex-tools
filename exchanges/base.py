@@ -11,10 +11,12 @@ from tenacity import RetryCallState, retry, retry_if_exception_type, stop_after_
 
 
 MarketId = str | int
+LIVE_ORDER_STATUSES = frozenset({"OPEN", "PARTIALLY_FILLED"})
+TERMINAL_ORDER_STATUSES = frozenset({"FILLED", "CANCELED", "REJECTED"})
 
 
 class OrderOutcomeUnknown(RuntimeError):
-    """A submitted order may exist; an exchange order ID allows reconciliation."""
+    """A submit or cancel may have taken effect; an order ID permits reconciliation."""
 
     def __init__(self, message: str, order_id: str | None = None):
         super().__init__(message)
@@ -60,7 +62,11 @@ def query_retry(
 
 @dataclass
 class OrderResult:
-    """Standardized order result structure."""
+    """A confirmed submission result, not proof that an accepted order filled.
+
+    An ambiguous submission must raise OrderOutcomeUnknown. A successful
+    cancellation must carry the final cumulative fill and terminal status.
+    """
     success: bool
     order_id: Optional[str] = None
     side: Optional[str] = None
@@ -73,7 +79,7 @@ class OrderResult:
 
 @dataclass
 class OrderInfo:
-    """Standardized order information structure."""
+    """One order's original size, cumulative fill, remainder and normalized status."""
     order_id: str
     side: str
     size: Decimal
@@ -131,7 +137,11 @@ class BaseExchangeClient(ABC):
 
     @abstractmethod
     async def get_order_info(self, order_id: str) -> Optional[OrderInfo]:
-        """Get order information."""
+        """Get this order, not a position-derived guess.
+
+        None means absent from the exchange's available order history; it is
+        not proof that a timed-out submission was rejected. Read errors raise.
+        """
         pass
 
     @abstractmethod

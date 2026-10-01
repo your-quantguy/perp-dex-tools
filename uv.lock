@@ -469,7 +469,7 @@ wheels = [
 
 [[package]]
 name = "lighter-sdk"
-version = "1.0.4"
+version = "1.1.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -482,9 +482,9 @@ dependencies = [
     { name = "urllib3" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/83/d9/2e35ec19ad35cf873dcced98ce99ad7d0354de62408273fa5339bffdbf7c/lighter_sdk-1.0.4.tar.gz", hash = "sha256:27daba45a51c81f5f96af82c5f9a55b2fdc8e6efea514fb630607c50bac68d88", size = 23120508, upload-time = "2026-02-26T17:14:56.993Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ed/6d/7aeaa4dd19d6f0900878a99b10654bb014a64fdeabf4c744a270c14bb93e/lighter_sdk-1.1.6.tar.gz", hash = "sha256:924d9d51f8a36a8e25e6d223d718da0ba4c40fe8c954c0084b59e82f75107485", size = 31664062, upload-time = "2026-09-30T09:17:21.32Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/23/79/00c95284f9820dffee3ebabab9ccc9022aef02637dd4b4b3cf36e2388db5/lighter_sdk-1.0.4-py3-none-any.whl", hash = "sha256:77467abb44a4a59fc710fc49e5f0edc7b84f0239890640ed204540b5d7e02b6c", size = 23437493, upload-time = "2026-02-26T17:14:29.561Z" },
+    { url = "https://files.pythonhosted.org/packages/30/d1/d40ba8f83644d34fa52d8e50330da7bcf9e4f8d2d6ea8e0ae0a8ba68e176/lighter_sdk-1.1.6-py3-none-any.whl", hash = "sha256:64be3cd2a7e6fd5d3838137c486125e5ad16478bb3afdbfea03d3e9f37711ec5", size = 32132494, upload-time = "2026-09-30T09:17:16.508Z" },
 ]
 
 [[package]]
@@ -578,7 +578,7 @@ requires-dist = [
     { name = "bulk-keychain", specifier = "==0.1.27" },
     { name = "certifi" },
     { name = "cryptography", specifier = ">=41,<47" },
-    { name = "lighter-sdk", specifier = "==1.0.4" },
+    { name = "lighter-sdk", specifier = "==1.1.6" },
     { name = "python-dotenv", specifier = ">=1,<2" },
     { name = "pytz", specifier = ">=2025.2" },
     { name = "requests", specifier = ">=2.32.5,<3" },

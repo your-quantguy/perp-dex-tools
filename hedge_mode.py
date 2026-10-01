@@ -14,15 +14,16 @@ from typing import Protocol, cast
 import dotenv
 
 from exchanges import ExchangeFactory
-from exchanges.base import BaseExchangeClient, MarketId, OrderInfo, OrderOutcomeUnknown, OrderResult
+from exchanges.base import (BaseExchangeClient, LIVE_ORDER_STATUSES, MarketId, OrderInfo,
+                            OrderOutcomeUnknown, OrderResult, TERMINAL_ORDER_STATUSES)
 from helpers import TradingLogger
 from helpers.lark_bot import LarkBot
 from helpers.telegram_bot import TelegramBot
 from trading_bot import TradingConfig
 
 
-TERMINAL = {"FILLED", "CANCELED", "REJECTED"}
-LIVE = {"OPEN", "PARTIALLY_FILLED"}
+TERMINAL = TERMINAL_ORDER_STATUSES
+LIVE = LIVE_ORDER_STATUSES
 
 
 class LighterHedgeClient(Protocol):

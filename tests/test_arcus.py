@@ -2,6 +2,7 @@ import json
 import os
 import time
 import unittest
+from dataclasses import replace
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
@@ -422,12 +423,13 @@ class ArcusTests(unittest.IsolatedAsyncioTestCase):
         self.client._remember(self.raw(remaining="0.015"))
         self.client._ready.set()
         self.client._request = AsyncMock(return_value={"status": "CANCEL_ACKNOWLEDGED"})
-        final = self.client._remember(self.raw(status="CANCELED", remaining="0.015", seq=2))
+        final = replace(self.client._remember(self.raw(status="CANCELED", remaining="0.015", seq=2)))
         self.client._confirm = AsyncMock(return_value=final)
         # Restore live state to exercise submit instead of cached terminal shortcut.
         self.client._orders["entry"].status = "OPEN"
         result = await self.client.cancel_order("entry")
         self.client._confirm.assert_awaited_once()
+        self.assertEqual(result.status, "CANCELED")
         self.assertEqual(result.filled_size, Decimal("0.005"))
         request_call = self.client._request.await_args
         assert request_call is not None

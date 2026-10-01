@@ -50,6 +50,16 @@ class BulkBotOrderEventTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
         self.assertTrue(self.bot.order_filled_event.is_set())
 
+    async def test_lighter_fill_uses_the_same_order_id_correlation(self):
+        self.bot.config.exchange = "lighter"
+        self.bot._bulk_open_order_id = "new"
+        self.handler(self._filled("old"))
+        await asyncio.sleep(0)
+        self.assertFalse(self.bot.order_filled_event.is_set())
+        self.handler(self._filled("new"))
+        await asyncio.sleep(0)
+        self.assertTrue(self.bot.order_filled_event.is_set())
+
     async def test_fill_before_order_ack_is_replayed_by_its_id(self):
         async def place_open_order(*_args):
             self.handler(self._filled("new"))
@@ -69,7 +79,7 @@ class BulkBotOrderEventTests(unittest.IsolatedAsyncioTestCase):
         self.bot.exchange_client.get_order_price = AsyncMock(return_value=Decimal("2001"))
         self.bot.exchange_client.get_order_info = AsyncMock(return_value=SimpleNamespace(status="OPEN"))
         self.bot.exchange_client.cancel_order = AsyncMock(return_value=OrderResult(
-            True, "entry", filled_size=Decimal("0.04"),
+            True, "entry", status="CANCELED", filled_size=Decimal("0.04"),
         ))
         self.bot.exchange_client.place_close_order = AsyncMock(return_value=OrderResult(
             True, "exit", "sell", Decimal("0.04"), Decimal("2000.4"), "OPEN",

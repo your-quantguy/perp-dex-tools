@@ -4,6 +4,8 @@
 
 This project supports **Bulk, Arcus, and Lighter** in single-exchange mode, plus **Bulk↔Lighter and Arcus↔Lighter** hedge mode. `runbot.py` places a limit entry order on the selected exchange, then places a take-profit order after a fill. It monitors orders, positions, and market data. Single-exchange mode has no stop loss or automatic position close on exit.
 
+All three exchanges use the same order semantics: an order ID can be queried and canceled; size is the original quantity, filled size is cumulative, and remaining size is unfilled quantity; normalized statuses are `OPEN`, `PARTIALLY_FILLED`, `FILLED`, `CANCELED`, and `REJECTED`. A submission acknowledgment means the exchange accepted the request, while fills come from order queries or updates. Cancellation succeeds only after the terminal status and cumulative fill are confirmed. If the outcome cannot be confirmed, automatic ordering stops for manual inspection. Lighter uses the client order index as its order ID, and its history queries are subject to the exchange's retention limits.
+
 ## Install
 
 Use Python 3.12 and [uv](https://docs.astral.sh/uv/). `uv.lock` pins the resolved dependencies:

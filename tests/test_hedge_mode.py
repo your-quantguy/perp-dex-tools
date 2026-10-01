@@ -315,6 +315,52 @@ class HedgeModeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LighterHedgeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_signer_check_closes_sdk_session(self):
+        client = cast(Any, LighterClient.__new__(LighterClient))
+        client.lighter_client = None
+        client.api_key_private_key = "test-key"
+        client.base_url = "https://example.invalid"
+        client.account_index = 1
+        client.api_key_index = 0
+        client.logger = SimpleNamespace(log=lambda *_args: None)
+        with patch("exchanges.lighter.SignerClient") as signer_class:
+            signer_class.return_value.check_client.return_value = "invalid key"
+            signer_class.return_value.close = AsyncMock()
+            with self.assertRaisesRegex(Exception, "CheckClient error"):
+                await client._initialize_lighter_client()
+        signer_class.return_value.close.assert_awaited_once()
+        self.assertIsNone(client.lighter_client)
+
+    async def test_disconnect_closes_both_sdk_sessions(self):
+        client = cast(Any, LighterClient.__new__(LighterClient))
+        client.api_client = SimpleNamespace(close=AsyncMock())
+        client.lighter_client = SimpleNamespace(close=AsyncMock())
+        api_session, signer_session = client.api_client, client.lighter_client
+        client.logger = SimpleNamespace(log=lambda *_args: None)
+        await client.disconnect()
+        api_session.close.assert_awaited_once()
+        signer_session.close.assert_awaited_once()
+        self.assertIsNone(client.api_client)
+        self.assertIsNone(client.lighter_client)
+
+    async def test_active_orders_pass_sdk_authorization_header(self):
+        client = cast(Any, LighterClient.__new__(LighterClient))
+        client.config = SimpleNamespace(contract_id=1)
+        client.account_index = 2
+        client.api_key_index = 3
+        client.api_client = object()
+        client.lighter_client = SimpleNamespace(
+            create_auth_token_with_expiry=lambda **_kwargs: ("token", None),
+        )
+        with patch("exchanges.lighter.OrderApi") as order_api:
+            order_api.return_value.account_active_orders = AsyncMock(
+                return_value=SimpleNamespace(orders=[]),
+            )
+            self.assertEqual(await client._fetch_orders_with_retry(), [])
+        order_api.return_value.account_active_orders.assert_awaited_once_with(
+            account_index=2, market_id=1, authorization="token",
+        )
+
     async def test_market_metadata_initializes_api_client_before_connect(self):
         client = cast(Any, LighterClient.__new__(LighterClient))
         client.config = SimpleNamespace(ticker="ETH")
@@ -344,7 +390,7 @@ class LighterHedgeTests(unittest.IsolatedAsyncioTestCase):
         client._hedge_order_index = 1
         client.fetch_bbo_prices = AsyncMock(return_value=(Decimal(100), Decimal(101)))
         client.lighter_client = SimpleNamespace(create_market_order=AsyncMock(
-            return_value=(None, SimpleNamespace(code=0), None)))
+            return_value=(None, SimpleNamespace(code=200), None)))
         result = await client.place_hedge_market_order(
             Decimal("0.1"), "buy", Decimal("0.5"), reduce_only=True)
         self.assertTrue(result.success)

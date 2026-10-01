@@ -11,8 +11,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Optional, cast
 
 from exchanges import ExchangeFactory
-from exchanges.base import MarketId
-from exchanges.base import OrderInfo
+from exchanges.base import MarketId, OrderOutcomeUnknown
 from helpers import TradingLogger
 from helpers.lark_bot import LarkBot
 from helpers.telegram_bot import TelegramBot
@@ -20,7 +19,6 @@ from helpers.telegram_bot import TelegramBot
 if TYPE_CHECKING:
     from exchanges.arcus import ArcusClient
     from exchanges.bulk import BulkClient
-    from exchanges.lighter import LighterClient
 
 
 @dataclass
@@ -110,12 +108,6 @@ class TradingBot:
         except Exception as e:
             self.logger.log(f"Error during graceful shutdown: {e}", "ERROR")
 
-    def _lighter_current_order(self) -> OrderInfo:
-        order = cast("LighterClient", self.exchange_client).current_order
-        if order is None:
-            raise RuntimeError("Lighter order state is not available")
-        return order
-
     def _setup_websocket_handlers(self):
         """Setup WebSocket handlers for order updates."""
         def order_update_handler(message):
@@ -130,7 +122,7 @@ class TradingBot:
                 side = message.get('side', '')
                 order_type = message.get('order_type', '')
                 filled_size = Decimal(message.get('filled_size'))
-                if self.config.exchange in {"bulk", "arcus"} and order_type == "OPEN":
+                if order_type == "OPEN":
                     if order_id != self._bulk_open_order_id:
                         # A fill can beat the HTTP order acknowledgement. Keep
                         # that event by id, but never apply an old order's fill
@@ -221,10 +213,9 @@ class TradingBot:
             self.order_filled_event.clear()
             self.current_order_status = 'OPEN'
             self.order_filled_amount = Decimal(0)
-            if self.config.exchange in {"bulk", "arcus"}:
-                self._bulk_open_order_id = None
-                self._bulk_waiting_for_open_ack = True
-                self._bulk_early_open_updates.clear()
+            self._bulk_open_order_id = None
+            self._bulk_waiting_for_open_ack = True
+            self._bulk_early_open_updates.clear()
 
             # Place the order
             order_result = await self.exchange_client.place_open_order(
@@ -232,12 +223,11 @@ class TradingBot:
                 self.config.quantity,
                 self.config.direction
             )
-            if self.config.exchange in {"bulk", "arcus"}:
-                self._bulk_open_order_id = order_result.order_id
-                self._bulk_waiting_for_open_ack = False
-                early = self._bulk_early_open_updates.pop(order_result.order_id, None)
-                if early is not None:
-                    self._order_update_handler(early)
+            self._bulk_open_order_id = order_result.order_id
+            self._bulk_waiting_for_open_ack = False
+            early = self._bulk_early_open_updates.pop(order_result.order_id, None)
+            if early is not None:
+                self._order_update_handler(early)
 
             if not order_result.success:
                 return False
@@ -256,13 +246,14 @@ class TradingBot:
         except Exception as e:
             self.logger.log(f"Error placing order: {e}", "ERROR")
             self.logger.log(f"Traceback: {traceback.format_exc()}", "ERROR")
-            if self.config.exchange == "arcus" and self._bulk_open_order_id:
-                message = (f"[OPEN] [{self._bulk_open_order_id}] Arcus order handling stopped: {e}; "
+            if self._bulk_open_order_id or isinstance(e, OrderOutcomeUnknown):
+                message = (f"[OPEN] [{self._bulk_open_order_id or 'unknown ID'}] "
+                           f"{self.config.exchange} order handling stopped: {e}; "
                            "check the live order, position, and take-profit orders before restarting")
                 try:
                     await self.send_notification(message)
                 except Exception as notify_exc:
-                    self.logger.log(f"Arcus order alert failed: {notify_exc}", "WARNING")
+                    self.logger.log(f"Order alert failed: {notify_exc}", "WARNING")
                 raise
             # A timed-out Bulk submit may already be live. A rejected close is not.
             if self.config.exchange in {"bulk", "arcus"} and (
@@ -273,10 +264,9 @@ class TradingBot:
                 raise
             return False
         finally:
-            if self.config.exchange in {"bulk", "arcus"}:
-                self._bulk_open_order_id = None
-                self._bulk_waiting_for_open_ack = False
-                self._bulk_early_open_updates.clear()
+            self._bulk_open_order_id = None
+            self._bulk_waiting_for_open_ack = False
+            self._bulk_early_open_updates.clear()
 
     async def _recover_arcus_open_order(self, order_id):
         """Pause on stale quotes without forgetting an already submitted order."""
@@ -370,9 +360,6 @@ class TradingBot:
             close_order_result = await self._place_close_after_open(
                 order_id, self.config.quantity, close_price, close_side
             )
-            if self.config.exchange == "lighter":
-                await asyncio.sleep(1)
-
             if not close_order_result.success:
                 self.logger.log(f"[CLOSE] Failed to place close order: {close_order_result.error_message}", "ERROR")
                 raise Exception(f"[CLOSE] Failed to place close order: {close_order_result.error_message}")
@@ -391,8 +378,6 @@ class TradingBot:
 
             if recovered_order is not None:
                 current_order_status = recovered_order.status
-            elif self.config.exchange == "lighter":
-                current_order_status = self._lighter_current_order().status
             else:
                 order_info = await self.exchange_client.get_order_info(order_id)
                 if order_info is None:
@@ -400,17 +385,15 @@ class TradingBot:
                 current_order_status = order_info.status
 
             while (
-                current_order_status == "OPEN"
+                current_order_status in {"OPEN", "PARTIALLY_FILLED"}
                 and should_wait(self.config.direction, new_order_price, order_result.price)
             ):
                 self.logger.log(f"[OPEN] [{order_id}] Waiting for order to be filled @ {order_result.price}", "INFO")
                 await asyncio.sleep(5)
-                if self.config.exchange == "lighter":
-                    current_order_status = self._lighter_current_order().status
-                else:
-                    order_info = await self.exchange_client.get_order_info(order_id)
-                    if order_info is not None:
-                        current_order_status = order_info.status
+                order_info = await self.exchange_client.get_order_info(order_id)
+                if order_info is None:
+                    raise RuntimeError(f"Order {order_id} state is unknown")
+                current_order_status = order_info.status
                 new_order_price, recovered_order = await self._get_monitored_open_price(order_id)
                 if recovered_order is not None:
                     current_order_status = recovered_order.status
@@ -418,33 +401,19 @@ class TradingBot:
             self.order_canceled_event.clear()
             # Cancel the order if it's still open
             self.logger.log(f"[OPEN] [{order_id}] Cancelling order and placing a new order", "INFO")
-            if self.config.exchange == "lighter":
+            try:
                 cancel_result = await self.exchange_client.cancel_order(order_id)
-                start_time = time.time()
-                while (time.time() - start_time < 10 and self._lighter_current_order().status != 'CANCELED' and
-                        self._lighter_current_order().status != 'FILLED'):
-                    await asyncio.sleep(0.1)
+                if not cancel_result.success or cancel_result.status not in {"FILLED", "CANCELED", "REJECTED"}:
+                    raise RuntimeError(f"{self.config.exchange} cancel outcome is unknown: {cancel_result.error_message}")
+                self.current_order_status = cancel_result.status
+            except Exception as e:
+                self.order_canceled_event.set()
+                self.logger.log(f"[OPEN] Error canceling order {order_id}: {e}", "ERROR")
+                raise
 
-                if self._lighter_current_order().status not in ['CANCELED', 'FILLED']:
-                    raise Exception(f"[OPEN] Error cancelling order: {self._lighter_current_order().status}")
-                else:
-                    self.order_filled_amount = self._lighter_current_order().filled_size
-            else:
-                try:
-                    cancel_result = await self.exchange_client.cancel_order(order_id)
-                    if not cancel_result.success:
-                        raise RuntimeError(f"{self.config.exchange} cancel outcome is unknown: {cancel_result.error_message}")
-                    else:
-                        self.current_order_status = "CANCELED"
-
-                except Exception as e:
-                    self.order_canceled_event.set()
-                    self.logger.log(f"[CLOSE] Error canceling order {order_id}: {e}", "ERROR")
-                    raise
-
-                if cancel_result.filled_size is None:
-                    raise RuntimeError(f"{self.config.exchange} cancel did not confirm the filled size")
-                self.order_filled_amount = cancel_result.filled_size
+            if cancel_result.filled_size is None:
+                raise RuntimeError(f"{self.config.exchange} cancel did not confirm the filled size")
+            self.order_filled_amount = cancel_result.filled_size
 
             if self.order_filled_amount > 0:
                 close_side = self.config.close_order_side
@@ -456,14 +425,10 @@ class TradingBot:
                 close_order_result = await self._place_close_after_open(
                     order_id, self.order_filled_amount, close_price, close_side
                 )
-                if self.config.exchange == "lighter":
-                    await asyncio.sleep(1)
-
                 self.last_open_order_time = time.time()
                 if not close_order_result.success:
                     self.logger.log(f"[CLOSE] Failed to place close order: {close_order_result.error_message}", "ERROR")
-                    if self.config.exchange in {"bulk", "arcus"}:
-                        raise RuntimeError(f"{self.config.exchange} close order rejected: {close_order_result.error_message}")
+                    raise RuntimeError(f"{self.config.exchange} close order rejected: {close_order_result.error_message}")
 
             return True
 
@@ -650,7 +615,7 @@ class TradingBot:
                             self.active_close_orders.append({
                                 'id': order.order_id,
                                 'price': order.price,
-                                'size': order.remaining_size if self.config.exchange in {"bulk", "arcus"} else order.size
+                                'size': order.remaining_size
                             })
 
                     # Periodic logging
