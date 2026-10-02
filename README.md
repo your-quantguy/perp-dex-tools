@@ -61,6 +61,12 @@ uv run --locked python hedge_mode.py --exchange arcus --hedge-exchange lighter -
 
 `--size` 是每笔 maker 订单的标的数量；`--iter` 是循环次数。默认 `--max-position 0` 时，每轮从零仓位买入并对冲，再卖出回零。设置正值后，maker 仓位逐笔累积到 `+max-position`，再逐笔反向到 `-max-position`；最后一轮结束后回到零，两腿始终保持反向。`max-position` 必须是 `size` 的整数倍。`--max-slippage` 默认限制 Lighter 单笔市价对冲的价格偏离为 0.5%；`--target-timeout` 默认允许每个目标仓位最多等待 600 秒；`--recovery-timeout` 默认允许订单恢复核对 15 秒。程序退出时不会自动撤销未确认订单或强制平仓，需人工核对两个账户。
 
+## 策略架构
+
+`runbot.py` 运行 `TakeProfitStrategy`，`hedge_mode.py` 运行 `HedgeCycleStrategy`；原有 `TradingBot` 和 `HedgeBot` 名称仍可导入。两个策略共用 `StrategyRunner` 管理交易所连接、断开和异常处理，共用 `Notifier` 发送 Telegram/飞书通知。对冲策略通过 `MakerFirstPairExecutor` 执行目标仓位、确认部分成交和核对反向腿。交易所会话配置使用 `VenueConfig`，不再借用止盈策略的参数。
+
+现阶段每个交易所账户、每个市场只运行一个策略。未来的价差收敛和 funding 策略可以复用运行器及两腿执行器，并分别实现机会判断、持仓和退出规则；若需要其他下单顺序，应增加相应执行器。现有程序不会在崩溃后自动接管仓位，重启前仍需人工核查。
+
 ## 主要参数与风险
 
 - `--direction buy|sell`：开仓方向。

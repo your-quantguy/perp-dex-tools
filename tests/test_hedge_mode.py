@@ -125,6 +125,12 @@ class HedgeModeTests(unittest.IsolatedAsyncioTestCase):
         await bot.run()
         self.assertEqual((maker.position, lighter.position), (Decimal(0), Decimal(0)))
 
+    async def test_pair_executor_reaches_target_without_cycle_policy(self):
+        bot, maker, lighter = self.make_bot()
+        await bot.pair.reach_target(Decimal("0.1"))
+        self.assertEqual((maker.position, lighter.position),
+                         (Decimal("0.1"), Decimal("-0.1")))
+
     async def test_mixed_networks_are_rejected_before_any_order(self):
         maker = FakeMaker()
         maker.network = "testnet"
@@ -147,7 +153,8 @@ class HedgeModeTests(unittest.IsolatedAsyncioTestCase):
             bot = HedgeBot(HedgeConfig("bulk", "ETH", Decimal("0.1"), 1,
                                        hedge_exchange="lighter"))
         self.assertEqual([call.args[0] for call in create.call_args_list], ["bulk", "lighter"])
-        self.assertEqual(bot.hedge_config.exchange, "lighter")
+        self.assertIs(create.call_args_list[1].args[1], bot.hedge_config)
+        self.assertEqual(bot.hedge_config.quantity, Decimal("0.1"))
 
     async def test_inexact_hedge_size_stops_before_maker_order(self):
         maker, lighter = FakeMaker(), FakeLighter()
@@ -338,7 +345,7 @@ class HedgeModeTests(unittest.IsolatedAsyncioTestCase):
         del bot._notify
         with patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "token",
                                   "TELEGRAM_CHAT_ID": "chat", "LARK_TOKEN": ""}):
-            with patch("hedge_mode.TelegramBot") as telegram:
+            with patch("helpers.notifications.TelegramBot") as telegram:
                 await HedgeBot._notify(bot, "check positions")
         telegram.return_value.__enter__.return_value.send_text.assert_called_once_with(
             "check positions")

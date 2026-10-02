@@ -61,6 +61,12 @@ uv run --locked python hedge_mode.py --exchange arcus --hedge-exchange lighter -
 
 `--size` is the underlying amount per maker order; `--iter` is the cycle count. With the default `--max-position 0`, each cycle buys from flat and sells back to flat. With a positive value, the maker position grows to `+max-position`, then reverses to `-max-position`; the final cycle returns to flat. The two legs remain opposite. `max-position` must be an exact multiple of `size`. `--max-slippage` limits each Lighter market hedge to 0.5% by default, `--target-timeout` defaults to 600 seconds per position target, and `--recovery-timeout` defaults to 15 seconds for order reconciliation. On exit, the bot does not force close positions or cancel orders whose outcomes are uncertain; review both accounts manually.
 
+## Strategy architecture
+
+`runbot.py` runs `TakeProfitStrategy`, and `hedge_mode.py` runs `HedgeCycleStrategy`; the former `TradingBot` and `HedgeBot` names remain importable. Both strategies use `StrategyRunner` for venue lifecycle and failure handling, plus `Notifier` for Telegram and Lark alerts. The hedge strategy uses `MakerFirstPairExecutor` to reach position targets, hedge partial fills, and reconcile uncertain orders. Exchange sessions use `VenueConfig` instead of placeholder take-profit settings.
+
+For now, run only one strategy per exchange account and market. Future spread-convergence and funding strategies can share the runner and pair executor while defining their own entry, hold, and exit decisions. An execution policy with a different order sequence will need its own executor. The program does not automatically take over positions after a crash; inspect both accounts before restarting.
+
 ## Parameters and risk
 
 - `--direction buy|sell`: entry direction.

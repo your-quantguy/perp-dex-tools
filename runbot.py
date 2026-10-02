@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""
-Modular Trading Bot - Supports multiple exchanges
-"""
+"""Single-venue take-profit strategy."""
 
 import argparse
 import asyncio
@@ -10,13 +8,13 @@ from pathlib import Path
 import sys
 import dotenv
 from decimal import Decimal
-from trading_bot import TradingBot, TradingConfig
+from trading_bot import TakeProfitConfig, TakeProfitStrategy
 from exchanges import ExchangeFactory
 
 
 def parse_arguments():
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description='Modular Trading Bot - Supports multiple exchanges')
+    parser = argparse.ArgumentParser(description='Single-venue take-profit strategy')
 
     # Exchange selection
     parser.add_argument('--exchange', type=str, required=True,
@@ -94,7 +92,7 @@ async def main():
     dotenv.load_dotenv(args.env_file)
 
     # Create configuration
-    config = TradingConfig(
+    config = TakeProfitConfig(
         ticker=args.ticker.upper(),
         contract_id='',  # will be set in the bot's run method
         tick_size=Decimal(0),
@@ -110,7 +108,7 @@ async def main():
     )
 
     # Create and run the bot
-    bot = TradingBot(config)
+    bot = TakeProfitStrategy(config)
     try:
         await bot.run()
     except Exception as e:
