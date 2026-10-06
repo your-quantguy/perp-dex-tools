@@ -17,14 +17,22 @@ TERMINAL = TERMINAL_ORDER_STATUSES
 
 
 class PairExecutionSettings(Protocol):
-    exchange: str
-    hedge_exchange: str
-    ticker: str
-    size: Decimal
-    fill_timeout: float
-    target_timeout: float
-    recovery_timeout: float
-    max_slippage: Decimal
+    @property
+    def exchange(self) -> str: ...
+    @property
+    def hedge_exchange(self) -> str: ...
+    @property
+    def ticker(self) -> str: ...
+    @property
+    def size(self) -> Decimal: ...
+    @property
+    def fill_timeout(self) -> float: ...
+    @property
+    def target_timeout(self) -> float: ...
+    @property
+    def recovery_timeout(self) -> float: ...
+    @property
+    def max_slippage(self) -> Decimal: ...
 
 
 class MakerFirstPairExecutor:
@@ -193,10 +201,16 @@ class MakerFirstPairExecutor:
         raise RuntimeError(f"Maker order {order_id} terminal state is unconfirmed: {last_error}")
 
     async def execute_maker_order(self, side: str, quantity: Decimal,
-                                   starting_position: Decimal, reduce_only: bool) -> Decimal:
+                                   starting_position: Decimal, reduce_only: bool,
+                                   price: Decimal | None = None) -> Decimal:
         self.hedge.validate_hedge_quantity(quantity)
         try:
-            if reduce_only:
+            if price is not None:
+                submit = getattr(self.maker, "place_post_only_order", None)
+                if submit is None:
+                    raise TypeError("Maker venue does not support an explicit post-only price")
+                result = await submit(self.maker_config.contract_id, quantity, price, side, reduce_only)
+            elif reduce_only:
                 bid, ask = await self.maker.fetch_bbo_prices(self.maker_config.contract_id)
                 if bid <= 0 or ask <= 0 or bid >= ask:
                     raise ConnectionError("Maker order book is not ready")

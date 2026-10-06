@@ -74,6 +74,8 @@ class ArcusClient(BaseExchangeClient):
         self._stop = asyncio.Event()
         self._fatal = None
         self._book = None
+        self._depth_bids = ()
+        self._depth_asks = ()
         self._book_at = 0.0
         self._orders = {}
         self._versions = {}
@@ -231,7 +233,7 @@ class ArcusClient(BaseExchangeClient):
                 async with self._ws_http.ws_connect(self.ws_url, heartbeat=15, receive_timeout=45) as ws:
                     self._ws = ws
                     await ws.send_json({"type": "subscribe", "channel": "l2Orderbook",
-                                        "id": self.symbol, "nLevels": 1})
+                                        "id": self.symbol, "nLevels": 20})
                     await ws.send_json({"type": "subscribe", "channel": "orders", "id": self.address,
                                         "accountIndex": self.account_index, "market": self.symbol})
                     have_orders = False
@@ -285,6 +287,27 @@ class ArcusClient(BaseExchangeClient):
             self._book = None
             return
         self._book, self._book_at = (bid, ask), time.monotonic()
+        self._depth_bids = tuple((Decimal(str(p)), Decimal(str(q))) for p, q in bids)
+        self._depth_asks = tuple((Decimal(str(p)), Decimal(str(q))) for p, q in asks)
+
+    async def get_spread_book(self, contract_id):
+        from strategies.spread_model import BookSnapshot
+
+        await self.fetch_bbo_prices(contract_id)
+        return BookSnapshot(self._depth_bids, self._depth_asks, self._book_at)
+
+    async def get_spread_risk(self):
+        from strategies.spread_model import AccountRisk
+
+        data = await self._get("/account", **self._scope())
+        equity = Decimal(str(data["equity"]))
+        positions = data.get("positions")
+        if not isinstance(positions, dict):
+            raise ValueError("Arcus account positions are unavailable")
+        if any(p.get("marginMode") != "CROSS" for p in positions.values()):
+            raise ValueError("Spread risk does not support Arcus isolated positions")
+        notional = sum((abs(Decimal(str(p["positionValueNotional"]))) for p in positions.values()), Decimal(0))
+        return AccountRisk(equity, None, notional)
 
     async def _reconcile(self, contents):
         if not isinstance(contents.get("openOrders"), list) or not isinstance(contents.get("recentClosedOrders"), list):
@@ -376,6 +399,16 @@ class ArcusClient(BaseExchangeClient):
         await self.fetch_bbo_prices(contract_id)
         return await self._place(quantity, await self.get_order_price(direction), direction, False)
 
+    async def place_post_only_order(self, contract_id, quantity, price, side, reduce_only):
+        await self.fetch_bbo_prices(contract_id)
+        return await self._place(quantity, price, side, reduce_only)
+
+    async def place_reduce_only_ioc(self, contract_id, quantity, side, max_slippage_percent):
+        bid, ask = await self.fetch_bbo_prices(contract_id)
+        factor = max_slippage_percent / 100
+        price = ask * (1 + factor) if side == "buy" else bid * (1 - factor)
+        return await self._place(quantity, self._snap(price, side), side, True, tif="IOC")
+
     async def place_close_order(self, contract_id, quantity, price, side):
         # Only a confirmed, zero-fill post-only rejection is safe to resubmit.
         # A lost acknowledgement or an unconfirmed order must remain unknown.
@@ -398,7 +431,7 @@ class ArcusClient(BaseExchangeClient):
                            result.status, "Arcus close rejected after 5 POST_ONLY_WOULD_CROSS attempts",
                            result.filled_size)
 
-    async def _place(self, quantity, price, side, reduce_only):
+    async def _place(self, quantity, price, side, reduce_only, tif="ALO"):
         self._check_quantity(quantity)
         if side not in {"buy", "sell"} or price <= 0 or not price.is_finite():
             raise ValueError("Arcus order side/price is invalid")
@@ -411,7 +444,7 @@ class ArcusClient(BaseExchangeClient):
         ts = self._timestamp()
         expiry = ts // 1000 + 40 * 86400 * 1_000_000
         body = self._scope(marketId=self.market_id, orderSide=side.upper(), orderType="LIMIT",
-                           quantity=format(quantity, "f"), price=format(price, "f"), timeInForce="ALO",
+                           quantity=format(quantity, "f"), price=format(price, "f"), timeInForce=tif,
                            goodTilTime=str(expiry), timestamp=ts, clientId=cid, reduceOnly=reduce_only)
         signed = self._place_payload(quantity, price, side, reduce_only, cid, ts, expiry)
         try:

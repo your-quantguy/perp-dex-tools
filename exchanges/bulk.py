@@ -68,6 +68,8 @@ class BulkClient(BaseExchangeClient):
         self._account_seen = False
         self._best_bid: Optional[Decimal] = None
         self._best_ask: Optional[Decimal] = None
+        self._depth_bids: tuple[tuple[Decimal, Decimal], ...] = ()
+        self._depth_asks: tuple[tuple[Decimal, Decimal], ...] = ()
         self._ws_task: Optional[asyncio.Task] = None
         self._ws_stop = asyncio.Event()
         self._ws_ready = asyncio.Event()
@@ -369,7 +371,29 @@ class BulkClient(BaseExchangeClient):
             return
         self._best_bid = bid
         self._best_ask = ask
+        self._depth_bids = tuple((Decimal(str(level["px"])), Decimal(str(level.get("sz", 0)))) for level in bids)
+        self._depth_asks = tuple((Decimal(str(level["px"])), Decimal(str(level.get("sz", 0)))) for level in asks)
         self._book_update_time = time.monotonic()
+
+    async def get_spread_book(self, contract_id: str):
+        from strategies.spread_model import BookSnapshot
+
+        await self.fetch_bbo_prices(contract_id)
+        return BookSnapshot(self._depth_bids, self._depth_asks, self._book_update_time)
+
+    async def get_spread_risk(self):
+        from strategies.spread_model import AccountRisk
+
+        account = await self._account()
+        if any(position.get("iso") for position in account["positions"]):
+            raise ValueError("Spread risk does not support Bulk isolated positions")
+        margin = account.get("margin")
+        if not isinstance(margin, dict):
+            raise ValueError("Bulk account margin is unavailable")
+        equity = Decimal(str(margin["totalMargin"]))
+        maintenance = Decimal(str(margin["marginUsed"]))
+        notional = Decimal(str(margin["notional"]))
+        return AccountRisk(equity, maintenance, notional)
 
     def _handle_account_data(self, data: Dict[str, Any]) -> None:
         kind = str(data.get("type") or "")
@@ -529,7 +553,8 @@ class BulkClient(BaseExchangeClient):
         name, body = next(iter(statuses[0].items()))
         return str(name), body if isinstance(body, dict) else {}
 
-    async def _place_limit(self, quantity: Decimal, price: Decimal, side: str, reduce_only: bool) -> OrderResult:
+    async def _place_limit(self, quantity: Decimal, price: Decimal, side: str, reduce_only: bool,
+                           tif: str = "ALO") -> OrderResult:
         await self._wait_market_ready()
         if quantity <= 0 or quantity % self._lot_size != 0 or price <= 0:
             return OrderResult(success=False, error_message="Invalid Bulk price or order quantity")
@@ -542,7 +567,7 @@ class BulkClient(BaseExchangeClient):
             "price": float(price),
             "size": float(quantity),
             "reduce_only": reduce_only,
-            "order_type": {"type": "limit", "tif": "ALO"},
+            "order_type": {"type": "limit", "tif": tif},
         })
         order_id = str(signed.get("order_id") or "")
         if not order_id:
@@ -556,9 +581,11 @@ class BulkClient(BaseExchangeClient):
             if normalized == "error" or normalized.startswith("rejected"):
                 return OrderResult(False, error_message=str(body.get("message") or status_name))
             if normalized.startswith("cancel"):
-                return OrderResult(False, error_message=str(body.get("message") or status_name))
+                return OrderResult(False, order_id, side, quantity, price, "CANCELED",
+                                   str(body.get("message") or status_name),
+                                   self._fill_totals.get(order_id, Decimal(0)))
             status = self._status(status_name)
-            if not reduce_only and status not in {"FILLED", "CANCELED"}:
+            if not reduce_only and tif == "ALO" and status not in {"FILLED", "CANCELED"}:
                 self._owned_open_order_ids.add(order_id)
             self._remember(OrderInfo(
                 order_id, side, quantity, price, status,
@@ -578,6 +605,18 @@ class BulkClient(BaseExchangeClient):
     async def place_open_order(self, contract_id: str, quantity: Decimal, direction: str) -> OrderResult:
         price = await self.get_order_price(direction)
         return await self._place_limit(quantity, price, direction, reduce_only=False)
+
+    async def place_post_only_order(self, contract_id: str, quantity: Decimal, price: Decimal,
+                                    side: str, reduce_only: bool) -> OrderResult:
+        await self.fetch_bbo_prices(contract_id)
+        return await self._place_limit(quantity, price, side, reduce_only)
+
+    async def place_reduce_only_ioc(self, contract_id: str, quantity: Decimal, side: str,
+                                     max_slippage_percent: Decimal) -> OrderResult:
+        bid, ask = await self.fetch_bbo_prices(contract_id)
+        factor = max_slippage_percent / 100
+        price = ask * (1 + factor) if side == "buy" else bid * (1 - factor)
+        return await self._place_limit(quantity, self.round_to_tick(price), side, True, tif="IOC")
 
     async def place_close_order(self, contract_id: str, quantity: Decimal, price: Decimal, side: str) -> OrderResult:
         """Retry a post-only close when the book has already traded through the target."""

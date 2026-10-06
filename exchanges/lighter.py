@@ -288,6 +288,33 @@ class LighterClient(BaseExchangeClient):
 
         return best_bid, best_ask
 
+    async def get_spread_book(self, contract_id: MarketId):
+        from strategies.spread_model import BookSnapshot
+
+        if contract_id != self.config.contract_id or not hasattr(self, "ws_manager"):
+            raise ConnectionError("Lighter order book is unavailable")
+        manager = self.ws_manager
+        async with manager.order_book_lock:
+            if not manager.snapshot_loaded or manager.order_book_sequence_gap:
+                raise ConnectionError("Lighter order book snapshot is not synchronized")
+            bids = tuple((Decimal(str(p)), Decimal(str(q))) for p, q in manager.order_book["bids"].items())
+            asks = tuple((Decimal(str(p)), Decimal(str(q))) for p, q in manager.order_book["asks"].items())
+            return BookSnapshot(bids, asks, manager.book_updated_at)
+
+    async def get_spread_risk(self):
+        from strategies.spread_model import AccountRisk
+
+        response = await AccountApi(self.api_client).account(by="index", value=str(self.account_index))
+        if not response or not response.accounts:
+            raise ValueError("Lighter account risk data is unavailable")
+        account = response.accounts[0]
+        if any(Decimal(p.position) != 0 and p.margin_mode != 0 for p in account.positions):
+            raise ValueError("Spread risk does not support Lighter isolated positions")
+        equity = min(Decimal(account.total_asset_value), Decimal(account.cross_asset_value))
+        notional = sum((abs(Decimal(p.position_value)) for p in account.positions), Decimal(0))
+        maintenance = Decimal(account.cross_maintenance_margin_requirement)
+        return AccountRisk(equity, maintenance, notional)
+
     async def _submit_order_with_retry(self, order_params: Dict[str, Any]) -> OrderResult:
         """Return only a confirmed SDK submission response."""
         # Ensure client is initialized

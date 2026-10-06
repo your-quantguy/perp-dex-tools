@@ -2,7 +2,7 @@
 
 [English](README_EN.md)
 
-本项目支持 **Bulk、Arcus、Lighter** 的单交易所模式，以及 **Bulk↔Lighter、Arcus↔Lighter** 对冲模式。`runbot.py` 在所选交易所挂开仓限价单，成交后按指定百分比挂止盈单，并监控订单、仓位和行情。单交易所模式没有止损或自动平仓退出机制。
+本项目支持 **Bulk、Arcus、Lighter** 的单交易所模式，以及 **Bulk↔Lighter、Arcus↔Lighter** 对冲与价差收敛模式。`runbot.py` 在所选交易所挂开仓限价单，成交后按指定百分比挂止盈单，并监控订单、仓位和行情。单交易所模式没有止损或自动平仓退出机制。
 
 三家交易所的订单接口使用相同语义：订单 ID 可用于查询和撤单；订单数量是原始委托量，成交量是累计成交量，剩余量是尚未成交的数量；订单状态统一为 `OPEN`、`PARTIALLY_FILLED`、`FILLED`、`CANCELED` 或 `REJECTED`。下单回执只表示交易所接受了请求，实际成交以订单查询或推送为准。撤单只有在确认终态和累计成交量后才返回成功；无法确认的操作会停止自动下单并要求人工核查。Lighter 的订单 ID 使用客户端订单编号，其历史查询受交易所保留范围限制。
 
@@ -63,9 +63,11 @@ uv run --locked python hedge_mode.py --exchange arcus --hedge-exchange lighter -
 
 ## 策略架构
 
+新增的价差收敛策略使用独立的信号与风险计算、单笔限时 maker 执行器，并复用双腿部分成交对冲机制。首版支持 Bulk/Lighter 和 Arcus/Lighter；配置、启动和信号对比见 [价差策略说明](docs/spread-strategy.md)。
+
 `runbot.py` 运行 `TakeProfitStrategy`，`hedge_mode.py` 运行 `HedgeCycleStrategy`；原有 `TradingBot` 和 `HedgeBot` 名称仍可导入。两个策略共用 `StrategyRunner` 管理交易所连接、断开和异常处理，共用 `Notifier` 发送 Telegram/飞书通知。对冲策略通过 `MakerFirstPairExecutor` 执行目标仓位、确认部分成交和核对反向腿。交易所会话配置使用 `VenueConfig`，不再借用止盈策略的参数。
 
-现阶段每个交易所账户、每个市场只运行一个策略。未来的价差收敛和 funding 策略可以复用运行器及两腿执行器，并分别实现机会判断、持仓和退出规则；若需要其他下单顺序，应增加相应执行器。现有程序不会在崩溃后自动接管仓位，重启前仍需人工核查。
+现阶段每个交易所账户、每个市场只运行一个策略。未来的 funding 策略可以复用运行器及两腿执行器，并分别实现机会判断、持仓和退出规则；若需要其他下单顺序，应增加相应执行器。现有程序不会在崩溃后自动接管仓位，重启前仍需人工核查。
 
 ## 主要参数与风险
 

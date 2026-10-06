@@ -8,6 +8,7 @@ import json
 from typing import Dict, Any, List, Optional, Tuple, Callable
 import websockets
 import os
+import time
 
 from helpers.lighter_ws import build_lighter_ws_url, lighter_ws_connect_kwargs
 
@@ -30,6 +31,7 @@ class LighterCustomWebSocketManager:
         self.order_book_offset = None
         self.order_book_sequence_gap = False
         self.order_book_lock = asyncio.Lock()
+        self.book_updated_at = 0.0
 
         # WebSocket URL
         self.ws_url = build_lighter_ws_url()
@@ -84,6 +86,7 @@ class LighterCustomWebSocketManager:
                     ob.pop(price, None)
                 else:
                     ob[price] = size
+                self.book_updated_at = time.monotonic()
             except (KeyError, ValueError, TypeError) as e:
                 self._log(f"Error processing order book update: {e}, update: {update}", "ERROR")
                 continue
