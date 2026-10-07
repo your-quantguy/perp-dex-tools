@@ -4,6 +4,8 @@
 
 本项目支持 **Bulk、Arcus、Lighter** 的单交易所模式。对冲与价差收敛模式可选 Bulk/Arcus、Bulk/Lighter、Arcus/Lighter；目前 Bulk 和 Arcus 可做 maker，三家都可做 taker。`runbot.py` 在所选交易所挂开仓限价单，成交后按指定百分比挂止盈单，并监控订单、仓位和行情。单交易所模式没有止损或自动平仓退出机制。
 
+Entropy（Hyperliquid 的 `io` 永续市场）可作为双腿模式的 taker；目前不支持单交易所止盈或 maker 角色。Arcus maker + Entropy taker 的价差策略要求两家同时挂牌同一标的。
+
 三家交易所的订单接口使用相同语义：订单 ID 可用于查询和撤单；订单数量是原始委托量，成交量是累计成交量，剩余量是尚未成交的数量；订单状态统一为 `OPEN`、`PARTIALLY_FILLED`、`FILLED`、`CANCELED` 或 `REJECTED`。下单回执只表示交易所接受了请求，实际成交以订单查询或推送为准。撤单只有在确认终态和累计成交量后才返回成功；无法确认的操作会停止自动下单并要求人工核查。Lighter 的订单 ID 使用客户端订单编号，其历史查询受交易所保留范围限制。
 
 ## 安装
@@ -46,11 +48,15 @@ uv run --locked python runbot.py --exchange bulk --ticker ETH --direction buy --
 uv run --locked python runbot.py --exchange lighter --ticker ETH --direction buy --quantity 0.1 --take-profit 0.02 --max-orders 40 --wait-time 450
 ```
 
+### Entropy
+
+先在 Hyperliquid 为主账户授权独立 API wallet，在 `.env` 设置 `ENTROPY_API_PRIVATE_KEY`、`ENTROPY_ACCOUNT_ADDRESS` 和可选的 `ENTROPY_NETWORK=mainnet`。密钥是 API wallet 私钥，地址是主账户地址。适配器仅使用官方 Hyperliquid SDK 提交有价格保护的 IOC 对冲单；当前只支持标准账户模式，不能用 unified account 或 portfolio margin。运行 Arcus/Entropy 价差前，在交易所把 Entropy 标的的逐仓杠杆设为不高于策略 `max_leverage`，并核实实际费率和 rebate。配置见 [价差策略说明](docs/spread-strategy.md)。
+
 ## 对冲模式
 
 `hedge_mode.py` 在 Bulk 或 Arcus 挂 maker 单，每次确认成交量后在所选 taker 交易所下等量反向即时单。maker 单到 `--fill-timeout` 后会撤单，并依据确认的最终成交量补齐对冲；两腿仓位核对通过后才开始下一笔。已知订单 ID 的提交回执丢失、短暂查询失败或撤单回执丢失时，会在 `--recovery-timeout` 内核对订单与仓位，确认后继续；结果仍不明时停止新单并通过已配置的 Telegram/飞书渠道告警，不会盲目重发订单。
 
-对冲腿由 `--hedge-exchange` 指定，默认为 `lighter`，也可选 `bulk` 或 `arcus`（不能与 maker 相同）。对冲腿适配器需要支持精确数量校验、带滑点上限且不会留下活动挂单的即时对冲单，以及行情、活动订单和仓位查询；下单回执仍需由策略核对最终仓位。
+对冲腿由 `--hedge-exchange` 指定，默认为 `lighter`，也可选 `bulk`、`arcus` 或 `entropy`（不能与 maker 相同）。对冲腿适配器需要支持精确数量校验、带滑点上限且不会留下活动挂单的即时对冲单，以及行情、活动订单和仓位查询；下单回执仍需由策略核对最终仓位。对冲循环策略没有价差策略的 2.5 倍杠杆风控。
 
 两腿必须连接相同网络；使用 Lighter 时另一腿必须在主网。启动时要求两个账户在该市场无仓位、无活动订单。请分别配置两家的凭据，并先确认市场、额度、费用与两边保证金足以执行反向单。
 
@@ -64,7 +70,7 @@ uv run --locked python hedge_mode.py --exchange bulk --hedge-exchange arcus --ti
 
 ## 策略架构
 
-价差收敛策略使用独立的信号与风险计算、单笔限时 maker 执行器，并复用双腿部分成交对冲机制。可使用上述三组交易所；配置、启动和信号对比见 [价差策略说明](docs/spread-strategy.md)。策略需要的交易所能力见 [能力接口说明](docs/exchange-capabilities.md)。
+价差收敛策略使用独立的信号与风险计算、单笔限时 maker 执行器，并复用双腿部分成交对冲机制。可使用上述三组交易所及 Entropy taker 组合；配置、启动和信号对比见 [价差策略说明](docs/spread-strategy.md)。策略需要的交易所能力见 [能力接口说明](docs/exchange-capabilities.md)。
 
 `runbot.py` 运行 `TakeProfitStrategy`，`hedge_mode.py` 运行 `HedgeCycleStrategy`；原有 `TradingBot` 和 `HedgeBot` 名称仍可导入。两个策略共用 `StrategyRunner` 管理交易所连接、断开和异常处理，共用 `Notifier` 发送 Telegram/飞书通知。对冲策略通过 `MakerFirstPairExecutor` 执行目标仓位、确认部分成交和核对反向腿。交易所会话配置使用 `VenueConfig`，不再借用止盈策略的参数。
 

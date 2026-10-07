@@ -14,6 +14,8 @@ from exchanges.arcus import ArcusClient
 from exchanges.base import OrderResult
 from exchanges.bulk import BulkClient
 from exchanges.capabilities import PairMaker, PairTaker, SpreadMaker, SpreadTaker, TakeProfitVenue
+from exchanges.entropy import EntropyClient
+from exchanges.factory import ExchangeFactory
 from exchanges.lighter import LighterClient
 from spread_mode import load_config
 from strategies.spread import SpreadStrategy
@@ -23,6 +25,7 @@ def test_strategy_capability_matrix():
     bulk = BulkClient.__new__(BulkClient)
     arcus = ArcusClient.__new__(ArcusClient)
     lighter = LighterClient.__new__(LighterClient)
+    entropy = EntropyClient.__new__(EntropyClient)
     for venue in (bulk, arcus, lighter):
         assert isinstance(venue, TakeProfitVenue)
         assert isinstance(venue, PairTaker)
@@ -32,6 +35,12 @@ def test_strategy_capability_matrix():
         assert isinstance(venue, SpreadMaker)
     assert not isinstance(lighter, PairMaker)
     assert not isinstance(lighter, SpreadMaker)
+    assert isinstance(entropy, PairTaker)
+    assert isinstance(entropy, SpreadTaker)
+    assert not isinstance(entropy, PairMaker)
+    assert not isinstance(entropy, TakeProfitVenue)
+    assert "entropy" in ExchangeFactory.get_capable_exchanges(SpreadTaker)
+    assert "entropy" not in ExchangeFactory.get_capable_exchanges(TakeProfitVenue)
 
 
 def test_spread_accepts_arcus_as_taker_and_reversed_roles(tmp_path):
@@ -49,6 +58,18 @@ def test_spread_accepts_arcus_as_taker_and_reversed_roles(tmp_path):
         strategy = SpreadStrategy(settings, maker=maker, hedge=taker,
                                   notifier=SimpleNamespace())
         assert strategy.venues == (maker, taker)
+
+
+def test_spread_accepts_arcus_maker_entropy_taker(tmp_path):
+    arcus: Any = ArcusClient.__new__(ArcusClient)
+    arcus.network = "mainnet"
+    entropy: Any = EntropyClient.__new__(EntropyClient)
+    entropy.network = "mainnet"
+    settings = replace(load_config(Path("spread_config.example.json"), resume=False),
+                       venue_a="arcus", venue_b="entropy", maker_exchange="arcus",
+                       ticker="SNDK", state_file=tmp_path / "state.json")
+    strategy = SpreadStrategy(settings, maker=arcus, hedge=entropy, notifier=SimpleNamespace())
+    assert strategy.venues == (arcus, entropy)
 
 
 @pytest.mark.parametrize("side,expected", [("buy", D("101.49")), ("sell", D("99.51"))])

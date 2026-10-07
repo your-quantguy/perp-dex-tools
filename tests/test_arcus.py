@@ -260,6 +260,21 @@ class ArcusTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(body["reduceOnly"])
         self.assertLessEqual(Decimal(body["price"]), Decimal("2713.5"))
 
+    async def test_isolated_margin_is_reported_as_facts_without_strategy_policy(self):
+        self.client._get = AsyncMock(side_effect=[
+            {"equity": "100", "freeCollateral": "75",
+             "positions": {"2": {"marginMode": "ISOLATED", "marginUsed": "20",
+                                 "positionValueNotional": "50"}}},
+            {"leverages": [{"marketId": 2, "marginMode": "ISOLATED", "leverage": 2}]},
+        ])
+        snapshot = await self.client.get_margin_snapshot()
+        self.assertEqual(snapshot.equity, Decimal(100))
+        self.assertEqual(snapshot.positions[0].market_id, "ETH-USD")
+        self.assertEqual(snapshot.positions[0].mode, "ISOLATED")
+        self.assertEqual(snapshot.positions[0].posted_collateral, Decimal(20))
+        self.assertIsNone(snapshot.positions[0].unrealized_pnl)
+        self.assertEqual(snapshot.market_leverage, Decimal(2))
+
     async def test_ack_is_not_success_until_confirmed(self):
         self.client._request = AsyncMock(return_value={"orderId": "new", "status": "ACK"})
         self.client._confirm = AsyncMock(side_effect=ValueError("bad state"))

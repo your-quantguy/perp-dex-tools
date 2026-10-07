@@ -10,6 +10,7 @@ import dotenv
 from decimal import Decimal
 from trading_bot import TakeProfitConfig, TakeProfitStrategy
 from exchanges import ExchangeFactory
+from exchanges.capabilities import TakeProfitVenue
 
 
 def parse_arguments():
@@ -18,9 +19,9 @@ def parse_arguments():
 
     # Exchange selection
     parser.add_argument('--exchange', type=str, required=True,
-                        choices=ExchangeFactory.get_supported_exchanges(),
+                        choices=ExchangeFactory.get_capable_exchanges(TakeProfitVenue),
                         help='Exchange to use. '
-                             f'Available: {", ".join(ExchangeFactory.get_supported_exchanges())}')
+                             f'Available: {", ".join(ExchangeFactory.get_capable_exchanges(TakeProfitVenue))}')
 
     # Trading parameters
     parser.add_argument('--ticker', type=str, default='ETH',

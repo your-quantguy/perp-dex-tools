@@ -12,10 +12,12 @@ from exchanges.config import VenueConfig
 from exchanges.arcus import ArcusClient
 from exchanges.bulk import BulkClient
 from exchanges.base import OrderResult
+from exchanges.market import MarginSnapshot
 from scripts.compare_spread_exits import compare
 from spread_mode import load_config
 from strategies.spread import MakerTakerExecution, SpreadConfig, SpreadPosition, SpreadStrategy
-from strategies.spread_model import AccountRisk, BookSnapshot, basis_bps, closing_signal, common_size_step, opening_signal
+from strategies.risk import evaluate_cross_venue_leg
+from strategies.spread_model import BookSnapshot, basis_bps, closing_signal, common_size_step, opening_signal
 
 
 def book(bids, asks, age=0):
@@ -52,10 +54,12 @@ def test_example_config_loads():
 
 
 def test_risk_limits_use_full_account_notional():
-    risk = AccountRisk(D(100), D(5), D(200))
-    assert risk.opening_room(D(100), D("2.5")) == D("0.5")
-    assert risk.buffer_fraction(D("0.1")) == D("0.475")
-    assert AccountRisk(D(100), None, D(200)).buffer_fraction(D("0.05")) == D("0.45")
+    risk = evaluate_cross_venue_leg(MarginSnapshot(D(100), D(200), D(5)),
+                                    "ETH-USD", D("2.5"), D("0.1"))
+    assert risk.opening_notional_room / D(100) == D("0.5")
+    assert risk.buffer_fraction == D("0.475")
+    assert evaluate_cross_venue_leg(MarginSnapshot(D(100), D(200), None),
+                                    "ETH-USD", D("2.5"), D("0.05")).buffer_fraction == D("0.45")
     assert common_size_step(D("0.03"), D("0.02")) == D("0.06")
 
 
@@ -66,12 +70,12 @@ def strategy(tmp_path, maker_book, hedge_book, maker_risk=None) -> Any:
     subject.hedge_config = VenueConfig("ETH", 1, D("0.01"), D(1), "sell")
     subject.maker = SimpleNamespace(
         get_quantity_step=lambda: D("0.1"), get_spread_book=AsyncMock(return_value=maker_book),
-        get_spread_risk=AsyncMock(return_value=maker_risk or AccountRisk(D(1000), D(0), D(0))),
+        get_margin_snapshot=AsyncMock(return_value=maker_risk or MarginSnapshot(D(1000), D(0), D(0))),
         get_active_orders=AsyncMock(return_value=[]), get_order_price=AsyncMock(return_value=D("90.5")),
     )
     subject.hedge = SimpleNamespace(
         get_quantity_step=lambda: D("0.1"), get_spread_book=AsyncMock(return_value=hedge_book),
-        get_spread_risk=AsyncMock(return_value=AccountRisk(D(1000), D(0), D(0))),
+        get_margin_snapshot=AsyncMock(return_value=MarginSnapshot(D(1000), D(0), D(0))),
         get_active_orders=AsyncMock(return_value=[]),
     )
     subject.pair = SimpleNamespace(
@@ -104,7 +108,7 @@ def test_open_once_then_accumulate_only_within_cap(tmp_path):
 def test_warning_pauses_opening_and_sends_once(tmp_path):
     subject = strategy(tmp_path, book([("90", "1")], [("91", "1")]),
                        book([("100", "1")], [("101", "1")]),
-                       AccountRisk(D(100), D(90), D(100)))
+                       MarginSnapshot(D(100), D(100), D(90)))
     asyncio.run(subject._tick())
     asyncio.run(subject._tick())
     subject.pair.execute_maker_order.assert_not_called()
@@ -125,7 +129,7 @@ def test_stale_book_pauses_and_recovers_without_order(tmp_path):
 def test_critical_buffer_invokes_emergency_before_signal(tmp_path):
     subject = strategy(tmp_path, book([("90", "1")], [("91", "1")]),
                        book([("100", "1")], [("101", "1")]),
-                       AccountRisk(D(100), D(93), D(100)))
+                       MarginSnapshot(D(100), D(100), D(93)))
     subject.position = SpreadPosition(D(1), D(10), time.time())
     subject.pair.positions.return_value = D(1)
     subject._emergency_close = AsyncMock()

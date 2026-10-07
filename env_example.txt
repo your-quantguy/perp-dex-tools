@@ -25,6 +25,11 @@ LIGHTER_API_KEY_INDEX=0
 # ARCUS_NETWORK=testnet
 # ARCUS_API_KEY=optional_64_hex_character_api_public_key
 
+# Entropy HIP-3 on Hyperliquid: authorize a separate API wallet.
+# ENTROPY_API_PRIVATE_KEY=0x_your_64_hex_character_api_wallet_private_key
+# ENTROPY_ACCOUNT_ADDRESS=0x_your_main_wallet_address
+# ENTROPY_NETWORK=mainnet
+
 # Optional notifications for single-exchange and hedge modes
 LARK_TOKEN=
 TELEGRAM_BOT_TOKEN=

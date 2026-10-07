@@ -10,15 +10,17 @@ from pathlib import Path
 from typing import Protocol
 
 import aiohttp
+import requests
 
 from exchanges import ExchangeFactory
 from exchanges.capabilities import SpreadMaker, SpreadTaker
 from exchanges.config import VenueConfig
-from exchanges.market import AccountRisk, BookSnapshot
+from exchanges.market import BookSnapshot, MarginSnapshot
 from execution.pair import MakerFirstPairExecutor
 from helpers import TradingLogger
 from helpers.notifications import Notifier
 from strategies.runner import StrategyRunner
+from strategies.risk import LegRisk, evaluate_cross_venue_leg
 from strategies.spread_model import (
     BPS, basis_bps, closing_signal, common_size_step, opening_signal,
     opposite_band_exit, rounded_size,
@@ -267,14 +269,19 @@ class SpreadStrategy:
                 else (hedge_book, maker_book))
         return maker_book, hedge_book, basis_bps(a, b, self.config.max_book_age, self.config.max_book_skew)
 
-    async def _risks(self) -> tuple[AccountRisk, AccountRisk, Decimal]:
-        maker = await self.maker.get_spread_risk()
-        hedge = await self.hedge.get_spread_risk()
-        a, b = ((maker, hedge) if self.config.venue_a == self.config.maker_exchange
-                else (hedge, maker))
-        buffer = min(a.buffer_fraction(self.config.maintenance_fraction_a),
-                     b.buffer_fraction(self.config.maintenance_fraction_b))
-        return maker, hedge, buffer
+    async def _risks(self) -> tuple[LegRisk, LegRisk, Decimal]:
+        maker: MarginSnapshot = await self.maker.get_margin_snapshot()
+        hedge: MarginSnapshot = await self.hedge.get_margin_snapshot()
+        maker_fraction, hedge_fraction = (
+            (self.config.maintenance_fraction_a, self.config.maintenance_fraction_b)
+            if self.config.venue_a == self.config.maker_exchange else
+            (self.config.maintenance_fraction_b, self.config.maintenance_fraction_a)
+        )
+        maker_risk = evaluate_cross_venue_leg(
+            maker, self.maker_config.contract_id, self.config.max_leverage, maker_fraction)
+        hedge_risk = evaluate_cross_venue_leg(
+            hedge, self.hedge_config.contract_id, self.config.max_leverage, hedge_fraction)
+        return maker_risk, hedge_risk, min(maker_risk.buffer_fraction, hedge_risk.buffer_fraction)
 
     async def _emergency_close(self):
         self.logger.log("Critical margin buffer; attempting immediate reduce-only close", "ERROR")
@@ -312,7 +319,8 @@ class SpreadStrategy:
             raise RuntimeError("Recorded and exchange positions differ; manual review required")
         try:
             maker_risk, hedge_risk, buffer = await self._risks()
-        except (ConnectionError, TimeoutError, OSError, aiohttp.ClientError) as exc:
+        except (ConnectionError, TimeoutError, OSError, aiohttp.ClientError,
+                requests.exceptions.RequestException) as exc:
             await self._data_unavailable(exc)
             return
         if buffer <= self.config.critical_buffer_fraction and actual != 0:
@@ -328,7 +336,8 @@ class SpreadStrategy:
             self._warning_sent = False
         try:
             maker_book, hedge_book, basis = await self._books()
-        except (ConnectionError, TimeoutError, OSError, ValueError, aiohttp.ClientError) as exc:
+        except (ConnectionError, TimeoutError, OSError, ValueError, aiohttp.ClientError,
+                requests.exceptions.RequestException) as exc:
             await self._data_unavailable(exc)
             return
         self._data_warning_sent = False
@@ -344,8 +353,8 @@ class SpreadStrategy:
             if maker_direction and (actual == 0 or actual * maker_direction > 0):
                 maker_side = "buy" if maker_direction > 0 else "sell"
                 quantity = min(self.config.size, self.config.max_position - abs(actual),
-                               maker_risk.opening_room(maker_book.mid, self.config.max_leverage),
-                               hedge_risk.opening_room(hedge_book.mid, self.config.max_leverage))
+                               maker_risk.opening_notional_room / maker_book.mid,
+                               hedge_risk.opening_notional_room / hedge_book.mid)
                 quote = await self.execution.quote(maker_side, quantity, maker_book, hedge_book)
                 if quote is not None:
                     available_edge = (self.config.center_bps - quote.basis_bps if a_direction > 0

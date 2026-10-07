@@ -175,9 +175,9 @@ HedgeBot = HedgeCycleStrategy
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--exchange", required=True, choices=ExchangeFactory.get_supported_exchanges(),
+    parser.add_argument("--exchange", required=True, choices=ExchangeFactory.get_capable_exchanges(PairMaker),
                         help="Maker exchange")
-    parser.add_argument("--hedge-exchange", choices=ExchangeFactory.get_supported_exchanges(), default="lighter",
+    parser.add_argument("--hedge-exchange", choices=ExchangeFactory.get_capable_exchanges(PairTaker), default="lighter",
                         help="Exchange with bounded immediate-order capability")
     parser.add_argument("--ticker", default="ETH")
     parser.add_argument("--size", type=Decimal, required=True, help="Underlying amount per maker order")

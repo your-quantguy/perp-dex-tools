@@ -8,7 +8,7 @@ from decimal import Decimal
 from typing import Protocol, runtime_checkable
 
 from exchanges.base import MarketId, OrderInfo, OrderResult
-from exchanges.market import AccountRisk, BookSnapshot
+from exchanges.market import BookSnapshot, MarginSnapshot
 
 
 @runtime_checkable
@@ -92,8 +92,8 @@ class OrderBookFeed(Protocol):
 
 
 @runtime_checkable
-class MarginRiskFeed(Protocol):
-    async def get_spread_risk(self) -> AccountRisk: ...
+class MarginSnapshotReader(Protocol):
+    async def get_margin_snapshot(self) -> MarginSnapshot: ...
 
 
 @runtime_checkable
@@ -122,11 +122,11 @@ class TakeProfitVenue(VenueSession, PositionReader, ActiveOrderReader,
 
 @runtime_checkable
 class SpreadMaker(PairMaker, QuantityGrid, OrderBookFeed,
-                  MarginRiskFeed, EmergencyReduce, Protocol):
+                  MarginSnapshotReader, EmergencyReduce, Protocol):
     """All capabilities for the first leg of maker/taker convergence."""
 
 
 @runtime_checkable
 class SpreadTaker(PairTaker, QuantityGrid, OrderBookFeed,
-                  MarginRiskFeed, Protocol):
+                  MarginSnapshotReader, Protocol):
     """All capabilities for the immediate leg of maker/taker convergence."""

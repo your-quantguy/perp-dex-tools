@@ -399,19 +399,27 @@ class BulkClient(BaseExchangeClient):
         await self.fetch_bbo_prices(contract_id)
         return BookSnapshot(self._depth_bids, self._depth_asks, self._book_update_time)
 
-    async def get_spread_risk(self):
-        from exchanges.market import AccountRisk
+    async def get_margin_snapshot(self):
+        from exchanges.market import MarginPosition, MarginSnapshot
 
         account = await self._account()
-        if any(position.get("iso") for position in account["positions"]):
-            raise ValueError("Spread risk does not support Bulk isolated positions")
         margin = account.get("margin")
         if not isinstance(margin, dict):
             raise ValueError("Bulk account margin is unavailable")
         equity = Decimal(str(margin["totalMargin"]))
-        maintenance = Decimal(str(margin["marginUsed"]))
+        margin_used = Decimal(str(margin["marginUsed"]))
         notional = Decimal(str(margin["notional"]))
-        return AccountRisk(equity, maintenance, notional)
+        positions = tuple(
+            MarginPosition(
+                market_id=str(position.get("symbol") or self.symbol),
+                mode="ISOLATED" if position.get("iso") else "CROSS",
+                notional=abs(Decimal(str(position.get("notional") or position.get("positionValue") or 0))),
+            )
+            for position in account["positions"]
+            if Decimal(str(position.get("size", 0))) != 0
+        )
+        return MarginSnapshot(equity, notional, None, positions=positions,
+                              margin_used=margin_used)
 
     def _handle_account_data(self, data: Dict[str, Any]) -> None:
         kind = str(data.get("type") or "")

@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from decimal import Decimal
 
+from exchanges.base import MarketId
+
 
 @dataclass(frozen=True)
 class BookSnapshot:
@@ -51,22 +53,33 @@ class BookSnapshot:
 
 
 @dataclass(frozen=True)
-class AccountRisk:
-    equity: Decimal
-    maintenance: Decimal | None
+class MarginPosition:
+    """Venue-reported facts for one position; missing values stay unknown."""
+
+    market_id: MarketId
+    mode: str
     notional: Decimal
+    posted_collateral: Decimal | None = None
+    unrealized_pnl: Decimal | None = None
+    maintenance_requirement: Decimal | None = None
+    liquidation_price: Decimal | None = None
 
-    def buffer_fraction(self, fallback_maintenance_fraction: Decimal) -> Decimal:
-        if self.equity <= 0 or self.notional < 0:
-            raise ValueError("Account risk values are invalid")
-        if self.notional == 0:
-            return Decimal(1)
-        maintenance = self.maintenance
-        if maintenance is None:
-            maintenance = self.notional * fallback_maintenance_fraction
-        return (self.equity - maintenance) / self.notional
 
-    def opening_room(self, price: Decimal, max_leverage: Decimal) -> Decimal:
-        if self.equity <= 0 or self.notional < 0:
-            raise ValueError("Account risk values are invalid")
-        return max(Decimal(0), (self.equity * max_leverage - self.notional) / price)
+@dataclass(frozen=True)
+class MarginSnapshot:
+    """Account facts, without any strategy leverage or liquidation policy.
+
+    ``margin_used`` may be initial margin rather than maintenance margin.
+    ``cross_equity`` is a venue-reported subset of total account equity.
+    """
+
+    equity: Decimal
+    total_notional: Decimal
+    maintenance_requirement: Decimal | None
+    available_collateral: Decimal | None = None
+    positions: tuple[MarginPosition, ...] = ()
+    account_mode: str = "STANDARD"
+    market_margin_mode: str | None = None
+    market_leverage: Decimal | None = None
+    margin_used: Decimal | None = None
+    cross_equity: Decimal | None = None

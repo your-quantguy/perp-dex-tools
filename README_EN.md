@@ -4,6 +4,8 @@
 
 This project supports **Bulk, Arcus, and Lighter** in single-exchange mode. Hedge and spread modes can pair Bulk/Arcus, Bulk/Lighter, or Arcus/Lighter: Bulk and Arcus currently support the maker role, and all three support the taker role. `runbot.py` places a limit entry order on the selected exchange, then places a take-profit order after a fill. It monitors orders, positions, and market data. Single-exchange mode has no stop loss or automatic position close on exit.
 
+Entropy (Hyperliquid's `io` perpetual DEX) is available as a taker in two-leg modes, including Arcus maker + Entropy taker where both venues list the same asset. It is not a single-venue or maker adapter.
+
 All three exchanges use the same order semantics: an order ID can be queried and canceled; size is the original quantity, filled size is cumulative, and remaining size is unfilled quantity; normalized statuses are `OPEN`, `PARTIALLY_FILLED`, `FILLED`, `CANCELED`, and `REJECTED`. A submission acknowledgment means the exchange accepted the request, while fills come from order queries or updates. Cancellation succeeds only after the terminal status and cumulative fill are confirmed. If the outcome cannot be confirmed, automatic ordering stops for manual inspection. Lighter uses the client order index as its order ID, and its history queries are subject to the exchange's retention limits.
 
 ## Install
@@ -46,11 +48,15 @@ Set `API_KEY_PRIVATE_KEY`, `LIGHTER_ACCOUNT_INDEX`, and `LIGHTER_API_KEY_INDEX`.
 uv run --locked python runbot.py --exchange lighter --ticker ETH --direction buy --quantity 0.1 --take-profit 0.02 --max-orders 40 --wait-time 450
 ```
 
+### Entropy
+
+Authorize a separate Hyperliquid API wallet, then set `ENTROPY_API_PRIVATE_KEY` to its private key and `ENTROPY_ACCOUNT_ADDRESS` to the main account address. Set `ENTROPY_NETWORK=mainnet` when needed. The adapter uses the official SDK for price-bounded IOC hedge orders. Spread risk currently supports standard accounts only; unified account and portfolio margin require a different policy. Set the Entropy market's isolated leverage at or below the spread strategy's `max_leverage` and verify actual fees and rebates before trading. See the [spread guide](docs/spread-strategy.md).
+
 ## Hedge mode
 
 `hedge_mode.py` places maker orders on Bulk or Arcus and uses an equal, opposite immediate order on the selected taker exchange for each confirmed fill. It cancels an unfilled maker order after `--fill-timeout`, reconciles the final fill, and checks both positions before placing another order. If a known order ID loses its submit acknowledgement, a read briefly fails, or a cancel acknowledgement is lost, the bot reconciles orders and positions within `--recovery-timeout` and continues once confirmed. An unresolved outcome stops new orders and triggers configured Telegram or Lark alerts; orders are never blindly resubmitted.
 
-Select the hedge leg with `--hedge-exchange`; it defaults to `lighter`, and can also be `bulk` or `arcus` (different from the maker). A hedge adapter must validate exact order quantities, submit an immediate order with a slippage bound that cannot remain active, and expose market data, active orders, and positions. The strategy still confirms the resulting position after an order acknowledgment.
+Select the hedge leg with `--hedge-exchange`; it defaults to `lighter`, and can also be `bulk`, `arcus`, or `entropy` (different from the maker). A hedge adapter must validate exact order quantities, submit an immediate order with a slippage bound that cannot remain active, and expose market data, active orders, and positions. The strategy still confirms the resulting position after an order acknowledgment. Hedge cycling does not apply the spread strategy's leverage cap.
 
 Both legs must use the same network; a Lighter leg requires a mainnet counterparty. Both accounts must start flat with no active orders in the selected market. Configure credentials for both exchanges and verify market availability, fees, account limits, and sufficient margin on both sides.
 
@@ -66,7 +72,7 @@ uv run --locked python hedge_mode.py --exchange bulk --hedge-exchange arcus --ti
 
 `runbot.py` runs `TakeProfitStrategy`, and `hedge_mode.py` runs `HedgeCycleStrategy`; the former `TradingBot` and `HedgeBot` names remain importable. Both strategies use `StrategyRunner` for venue lifecycle and failure handling, plus `Notifier` for Telegram and Lark alerts. The hedge strategy uses `MakerFirstPairExecutor` to reach position targets, hedge partial fills, and reconcile uncertain orders. Exchange sessions use `VenueConfig` instead of placeholder take-profit settings.
 
-The spread-convergence strategy uses the same pair executor with separate signal and risk logic. All three supported venue pairs are selected by capabilities; see the [capability map](docs/exchange-capabilities.md).
+The spread-convergence strategy uses the same pair executor with separate signal and risk logic. Venue pairs, including Entropy as taker when both markets list the asset, are selected by capabilities; see the [capability map](docs/exchange-capabilities.md).
 
 For now, run only one strategy per exchange account and market. Future funding strategies can share the runner and pair executor while defining their own entry, hold, and exit decisions. An execution policy with a different order sequence will need its own executor. The program does not automatically take over positions after a crash; inspect both accounts before restarting.
 

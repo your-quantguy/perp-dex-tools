@@ -312,18 +312,36 @@ class ArcusClient(BaseExchangeClient):
         await self.fetch_bbo_prices(contract_id)
         return BookSnapshot(self._depth_bids, self._depth_asks, self._book_at)
 
-    async def get_spread_risk(self):
-        from exchanges.market import AccountRisk
+    async def get_margin_snapshot(self):
+        from exchanges.market import MarginPosition, MarginSnapshot
 
         data = await self._get("/account", **self._scope())
         equity = Decimal(str(data["equity"]))
         positions = data.get("positions")
         if not isinstance(positions, dict):
             raise ValueError("Arcus account positions are unavailable")
-        if any(p.get("marginMode") != "CROSS" for p in positions.values()):
-            raise ValueError("Spread risk does not support Arcus isolated positions")
         notional = sum((abs(Decimal(str(p["positionValueNotional"]))) for p in positions.values()), Decimal(0))
-        return AccountRisk(equity, None, notional)
+        position_facts = tuple(
+            MarginPosition(
+                market_id=self.symbol if str(market_id) == str(self.market_id) else str(market_id),
+                mode=str(position["marginMode"]),
+                notional=abs(Decimal(str(position["positionValueNotional"]))),
+                posted_collateral=(Decimal(str(position["marginUsed"]))
+                                   if position["marginMode"] == "ISOLATED" else None),
+            )
+            for market_id, position in positions.items()
+        )
+        free = data.get("freeCollateral")
+        leverage_data = await self._get("/leverages", **self._scope())
+        leverage_entry = next((entry for entry in leverage_data["leverages"]
+                               if int(entry["marketId"]) == self.market_id), None)
+        if leverage_entry is None:
+            raise ValueError(f"Arcus leverage settings for {self.symbol} are unavailable")
+        return MarginSnapshot(equity, notional, None,
+                              available_collateral=Decimal(str(free)) if free is not None else None,
+                              positions=position_facts,
+                              market_margin_mode=str(leverage_entry["marginMode"]),
+                              market_leverage=Decimal(str(leverage_entry["leverage"])))
 
     async def _reconcile(self, contents):
         if not isinstance(contents.get("openOrders"), list) or not isinstance(contents.get("recentClosedOrders"), list):

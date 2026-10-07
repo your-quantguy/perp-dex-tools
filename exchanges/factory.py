@@ -13,6 +13,7 @@ class ExchangeFactory:
         'lighter': 'exchanges.lighter.LighterClient',
         'bulk': 'exchanges.bulk.BulkClient',
         'arcus': 'exchanges.arcus.ArcusClient',
+        'entropy': 'exchanges.entropy.EntropyClient',
     }
 
     @classmethod
@@ -74,6 +75,16 @@ class ExchangeFactory:
             List of supported exchange names
         """
         return list(cls._registered_exchanges.keys())
+
+    @classmethod
+    def get_capable_exchanges(cls, capability: type) -> list[str]:
+        """List adapters that structurally implement a runtime-checkable capability."""
+        supported = []
+        for name, path in cls._registered_exchanges.items():
+            exchange_class = cls._import_exchange_class(path)
+            if isinstance(exchange_class.__new__(exchange_class), capability):
+                supported.append(name)
+        return supported
 
     @classmethod
     def register_exchange(cls, name: str, exchange_class: type) -> None:

@@ -4,7 +4,7 @@ import time
 from math import lcm
 from decimal import Decimal, ROUND_DOWN
 
-from exchanges.market import AccountRisk as AccountRisk, BookSnapshot
+from exchanges.market import BookSnapshot
 
 BPS = Decimal(10_000)
 
