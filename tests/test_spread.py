@@ -65,19 +65,20 @@ def strategy(tmp_path, maker_book, hedge_book, maker_risk=None) -> Any:
     subject.maker_config = VenueConfig("ETH", "ETH-USD", D("0.01"), D(1), "buy")
     subject.hedge_config = VenueConfig("ETH", 1, D("0.01"), D(1), "sell")
     subject.maker = SimpleNamespace(
-        _lot_size=D("0.1"), get_spread_book=AsyncMock(return_value=maker_book),
+        get_quantity_step=lambda: D("0.1"), get_spread_book=AsyncMock(return_value=maker_book),
         get_spread_risk=AsyncMock(return_value=maker_risk or AccountRisk(D(1000), D(0), D(0))),
         get_active_orders=AsyncMock(return_value=[]), get_order_price=AsyncMock(return_value=D("90.5")),
     )
     subject.hedge = SimpleNamespace(
-        base_amount_multiplier=10, get_spread_book=AsyncMock(return_value=hedge_book),
+        get_quantity_step=lambda: D("0.1"), get_spread_book=AsyncMock(return_value=hedge_book),
         get_spread_risk=AsyncMock(return_value=AccountRisk(D(1000), D(0), D(0))),
         get_active_orders=AsyncMock(return_value=[]),
     )
     subject.pair = SimpleNamespace(
         positions=AsyncMock(return_value=D(0)), maker=subject.maker, hedge=subject.hedge,
         execute_maker_order=AsyncMock(return_value=D("0.5")))
-    subject.execution = MakerTakerExecution(cast(Any, subject.pair), subject.config)
+    subject.execution = MakerTakerExecution(cast(Any, subject.pair), subject.config,
+                                            cast(Any, subject.maker), cast(Any, subject.hedge))
     subject.position = SpreadPosition()
     subject.notifier = SimpleNamespace(send=AsyncMock())
     subject.logger = SimpleNamespace(log=Mock())

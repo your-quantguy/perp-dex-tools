@@ -33,6 +33,22 @@ class ArcusAPIError(Exception):
 
 
 class ArcusClient(BaseExchangeClient):
+    @property
+    def network_id(self) -> str:
+        return self.network
+
+    def get_quantity_step(self) -> Decimal:
+        if not hasattr(self, "step") or self.step <= 0:
+            raise RuntimeError("Arcus market quantity step is unavailable")
+        return self.step
+
+    def get_account_description(self) -> tuple[str, ...]:
+        return (f"Network: {self.network}", f"Trading account: {self.address}",
+                f"Subaccount: {self.account_index}", f"API key: {self.api_key}")
+
+    def validate_hedge_quantity(self, quantity: Decimal) -> None:
+        self._check_quantity(quantity)
+
     def _validate_config(self):
         if not os.getenv("ARCUS_API_SIGNING_KEY", "").strip():
             raise ValueError("ARCUS_API_SIGNING_KEY is required (not your Ethereum private key)")
@@ -291,13 +307,13 @@ class ArcusClient(BaseExchangeClient):
         self._depth_asks = tuple((Decimal(str(p)), Decimal(str(q))) for p, q in asks)
 
     async def get_spread_book(self, contract_id):
-        from strategies.spread_model import BookSnapshot
+        from exchanges.market import BookSnapshot
 
         await self.fetch_bbo_prices(contract_id)
         return BookSnapshot(self._depth_bids, self._depth_asks, self._book_at)
 
     async def get_spread_risk(self):
-        from strategies.spread_model import AccountRisk
+        from exchanges.market import AccountRisk
 
         data = await self._get("/account", **self._scope())
         equity = Decimal(str(data["equity"]))
@@ -408,6 +424,23 @@ class ArcusClient(BaseExchangeClient):
         factor = max_slippage_percent / 100
         price = ask * (1 + factor) if side == "buy" else bid * (1 - factor)
         return await self._place(quantity, self._snap(price, side), side, True, tif="IOC")
+
+    async def place_hedge_market_order(self, quantity: Decimal, side: str,
+                                       max_slippage_percent: Decimal,
+                                       reduce_only: bool = False) -> OrderResult:
+        """Bounded IOC limit order; the caller confirms its resulting position."""
+        if side not in {"buy", "sell"} or not Decimal(0) < max_slippage_percent <= Decimal(5):
+            raise ValueError("Invalid Arcus taker side or slippage limit")
+        self.validate_hedge_quantity(quantity)
+        bid, ask = await self.fetch_bbo_prices(self.config.contract_id)
+        factor = max_slippage_percent / 100
+        protection = ask * (1 + factor) if side == "buy" else bid * (1 - factor)
+        result = await self._place(quantity, self._snap(protection, side), side, reduce_only, tif="IOC")
+        # A partially filled IOC may end CANCELED. It is still a known outcome;
+        # the pair executor will read the resulting position and reject a short fill.
+        if result.order_id and result.status == "CANCELED" and result.filled_size:
+            result.success = True
+        return result
 
     async def place_close_order(self, contract_id, quantity, price, side):
         # Only a confirmed, zero-fill post-only rejection is safe to resubmit.

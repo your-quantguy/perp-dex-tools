@@ -2,7 +2,7 @@
 
 [中文说明](README.md)
 
-This project supports **Bulk, Arcus, and Lighter** in single-exchange mode, plus **Bulk↔Lighter and Arcus↔Lighter** hedge mode. `runbot.py` places a limit entry order on the selected exchange, then places a take-profit order after a fill. It monitors orders, positions, and market data. Single-exchange mode has no stop loss or automatic position close on exit.
+This project supports **Bulk, Arcus, and Lighter** in single-exchange mode. Hedge and spread modes can pair Bulk/Arcus, Bulk/Lighter, or Arcus/Lighter: Bulk and Arcus currently support the maker role, and all three support the taker role. `runbot.py` places a limit entry order on the selected exchange, then places a take-profit order after a fill. It monitors orders, positions, and market data. Single-exchange mode has no stop loss or automatic position close on exit.
 
 All three exchanges use the same order semantics: an order ID can be queried and canceled; size is the original quantity, filled size is cumulative, and remaining size is unfilled quantity; normalized statuses are `OPEN`, `PARTIALLY_FILLED`, `FILLED`, `CANCELED`, and `REJECTED`. A submission acknowledgment means the exchange accepted the request, while fills come from order queries or updates. Cancellation succeeds only after the terminal status and cumulative fill are confirmed. If the outcome cannot be confirmed, automatic ordering stops for manual inspection. Lighter uses the client order index as its order ID, and its history queries are subject to the exchange's retention limits.
 
@@ -48,24 +48,27 @@ uv run --locked python runbot.py --exchange lighter --ticker ETH --direction buy
 
 ## Hedge mode
 
-`hedge_mode.py` places maker orders on Bulk or Arcus and uses an equal, opposite market order on Lighter for each confirmed fill. It cancels an unfilled maker order after `--fill-timeout`, reconciles the final fill, and checks both positions before placing another order. If a known order ID loses its submit acknowledgement, a read briefly fails, or a cancel acknowledgement is lost, the bot reconciles orders and positions within `--recovery-timeout` and continues once confirmed. An unresolved outcome stops new orders and triggers configured Telegram or Lark alerts; orders are never blindly resubmitted.
+`hedge_mode.py` places maker orders on Bulk or Arcus and uses an equal, opposite immediate order on the selected taker exchange for each confirmed fill. It cancels an unfilled maker order after `--fill-timeout`, reconciles the final fill, and checks both positions before placing another order. If a known order ID loses its submit acknowledgement, a read briefly fails, or a cancel acknowledgement is lost, the bot reconciles orders and positions within `--recovery-timeout` and continues once confirmed. An unresolved outcome stops new orders and triggers configured Telegram or Lark alerts; orders are never blindly resubmitted.
 
-Select the hedge leg with `--hedge-exchange`; it defaults to `lighter`, the only supported choice for now. A hedge adapter must validate exact order quantities, submit an immediate order with a slippage bound that cannot remain active, and expose market data, active orders, and positions. The strategy still confirms the resulting position after an order acknowledgment.
+Select the hedge leg with `--hedge-exchange`; it defaults to `lighter`, and can also be `bulk` or `arcus` (different from the maker). A hedge adapter must validate exact order quantities, submit an immediate order with a slippage bound that cannot remain active, and expose market data, active orders, and positions. The strategy still confirms the resulting position after an order acknowledgment.
 
-Lighter currently connects only to mainnet, so the maker exchange **must also be on mainnet**. Both accounts must start flat with no active orders in the selected market. Configure credentials for both exchanges and verify market availability, fees, account limits, and sufficient Lighter margin.
+Both legs must use the same network; a Lighter leg requires a mainnet counterparty. Both accounts must start flat with no active orders in the selected market. Configure credentials for both exchanges and verify market availability, fees, account limits, and sufficient margin on both sides.
 
 ```bash
 uv run --locked python hedge_mode.py --exchange bulk --ticker ETH --size 0.1 --iter 2
 uv run --locked python hedge_mode.py --exchange arcus --hedge-exchange lighter --ticker ETH --size 0.1 --iter 2 --max-position 0.5
+uv run --locked python hedge_mode.py --exchange bulk --hedge-exchange arcus --ticker ETH --size 0.1 --iter 2
 ```
 
-`--size` is the underlying amount per maker order; `--iter` is the cycle count. With the default `--max-position 0`, each cycle buys from flat and sells back to flat. With a positive value, the maker position grows to `+max-position`, then reverses to `-max-position`; the final cycle returns to flat. The two legs remain opposite. `max-position` must be an exact multiple of `size`. `--max-slippage` limits each Lighter market hedge to 0.5% by default, `--target-timeout` defaults to 600 seconds per position target, and `--recovery-timeout` defaults to 15 seconds for order reconciliation. On exit, the bot does not force close positions or cancel orders whose outcomes are uncertain; review both accounts manually.
+`--size` is the underlying amount per maker order; `--iter` is the cycle count. With the default `--max-position 0`, each cycle buys from flat and sells back to flat. With a positive value, the maker position grows to `+max-position`, then reverses to `-max-position`; the final cycle returns to flat. The two legs remain opposite. `max-position` must be an exact multiple of `size`. `--max-slippage` bounds each taker order by 0.5% by default, `--target-timeout` defaults to 600 seconds per position target, and `--recovery-timeout` defaults to 15 seconds for order reconciliation. On exit, the bot does not force close positions or cancel orders whose outcomes are uncertain; review both accounts manually.
 
 ## Strategy architecture
 
 `runbot.py` runs `TakeProfitStrategy`, and `hedge_mode.py` runs `HedgeCycleStrategy`; the former `TradingBot` and `HedgeBot` names remain importable. Both strategies use `StrategyRunner` for venue lifecycle and failure handling, plus `Notifier` for Telegram and Lark alerts. The hedge strategy uses `MakerFirstPairExecutor` to reach position targets, hedge partial fills, and reconcile uncertain orders. Exchange sessions use `VenueConfig` instead of placeholder take-profit settings.
 
-For now, run only one strategy per exchange account and market. Future spread-convergence and funding strategies can share the runner and pair executor while defining their own entry, hold, and exit decisions. An execution policy with a different order sequence will need its own executor. The program does not automatically take over positions after a crash; inspect both accounts before restarting.
+The spread-convergence strategy uses the same pair executor with separate signal and risk logic. All three supported venue pairs are selected by capabilities; see the [capability map](docs/exchange-capabilities.md).
+
+For now, run only one strategy per exchange account and market. Future funding strategies can share the runner and pair executor while defining their own entry, hold, and exit decisions. An execution policy with a different order sequence will need its own executor. The program does not automatically take over positions after a crash; inspect both accounts before restarting.
 
 ## Parameters and risk
 

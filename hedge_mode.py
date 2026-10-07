@@ -12,15 +12,12 @@ from pathlib import Path
 import dotenv
 
 from exchanges import ExchangeFactory
-from exchanges.base import BaseExchangeClient, HedgeExecutionClient
+from exchanges.capabilities import PairMaker, PairTaker
 from exchanges.config import VenueConfig
 from execution.pair import MakerFirstPairExecutor
 from helpers import TradingLogger
 from helpers.notifications import Notifier
 from strategies.runner import StrategyRunner, VenueLifecycle
-
-
-HEDGE_EXCHANGES = ("lighter",)
 
 
 @dataclass
@@ -38,10 +35,8 @@ class HedgeCycleConfig:
     hedge_exchange: str = "lighter"
 
     def __post_init__(self):
-        if self.exchange not in {"bulk", "arcus"}:
-            raise ValueError("Hedge maker exchange must be bulk or arcus")
-        if self.hedge_exchange not in HEDGE_EXCHANGES:
-            raise ValueError(f"Unsupported hedge exchange: {self.hedge_exchange}")
+        if not self.exchange or not self.hedge_exchange:
+            raise ValueError("Both exchange names are required")
         if self.exchange == self.hedge_exchange:
             raise ValueError("Maker and hedge exchanges must differ")
         if (self.size <= 0 or self.iterations <= 0 or self.fill_timeout <= 0
@@ -72,18 +67,20 @@ class HedgeCycleStrategy:
             ticker=config.ticker, contract_id="", tick_size=Decimal(0),
             quantity=config.size, direction="sell",
         )
-        self.maker: BaseExchangeClient = maker_client or ExchangeFactory.create_exchange(
+        selected_maker = maker_client or ExchangeFactory.create_exchange(
             config.exchange, self.maker_config,
         )
         selected_hedge = hedge_client or ExchangeFactory.create_exchange(
             config.hedge_exchange, self.hedge_config,
         )
-        if not isinstance(selected_hedge, HedgeExecutionClient):
+        if not isinstance(selected_maker, PairMaker):
+            raise TypeError(f"{config.exchange} does not support post-only maker orders and order reconciliation")
+        if not isinstance(selected_hedge, PairTaker):
             raise TypeError(f"{config.hedge_exchange} does not support bounded market hedges")
+        self.maker = selected_maker
         self.hedge = selected_hedge
-        maker_network = getattr(self.maker, "signature_domain", None) or getattr(self.maker, "network", "mainnet")
-        if config.hedge_exchange == "lighter" and maker_network != "mainnet":
-            raise ValueError("Lighter hedge mode requires the maker exchange on mainnet too")
+        if self.maker.network_id != self.hedge.network_id:
+            raise ValueError("Hedge venues must use the same network")
         self.maker.setup_order_update_handler(lambda _message: None)
         self.hedge.setup_order_update_handler(lambda _message: None)
         self.notifier = Notifier()
@@ -178,10 +175,10 @@ HedgeBot = HedgeCycleStrategy
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--exchange", required=True, choices=("bulk", "arcus"),
+    parser.add_argument("--exchange", required=True, choices=ExchangeFactory.get_supported_exchanges(),
                         help="Maker exchange")
-    parser.add_argument("--hedge-exchange", choices=HEDGE_EXCHANGES, default="lighter",
-                        help="Hedge exchange (currently only lighter)")
+    parser.add_argument("--hedge-exchange", choices=ExchangeFactory.get_supported_exchanges(), default="lighter",
+                        help="Exchange with bounded immediate-order capability")
     parser.add_argument("--ticker", default="ETH")
     parser.add_argument("--size", type=Decimal, required=True, help="Underlying amount per maker order")
     parser.add_argument("--iter", type=int, required=True, help="Number of hedge cycles")

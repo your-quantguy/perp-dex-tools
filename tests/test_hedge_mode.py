@@ -21,6 +21,10 @@ class FakeMaker:
     def setup_order_update_handler(self, handler):
         self.handler = handler
 
+    @property
+    def network_id(self):
+        return self.network
+
     async def get_contract_attributes(self):
         return "ETH-USD", Decimal("0.01")
 
@@ -38,6 +42,12 @@ class FakeMaker:
 
     async def fetch_bbo_prices(self, contract_id):
         return Decimal(100), Decimal(101)
+
+    async def get_order_price(self, direction):
+        return Decimal(100)
+
+    async def place_post_only_order(self, contract_id, quantity, price, side, reduce_only):
+        return self._fill(quantity, side, reduce_only)
 
     async def place_open_order(self, contract_id, quantity, side):
         return self._fill(quantity, side, False)
@@ -68,6 +78,10 @@ class FakeLighter:
     def __init__(self):
         self.position = Decimal(0)
         self.orders = []
+
+    @property
+    def network_id(self):
+        return "mainnet"
 
     def setup_order_update_handler(self, handler):
         self.handler = handler
@@ -134,14 +148,19 @@ class HedgeModeTests(unittest.IsolatedAsyncioTestCase):
     async def test_mixed_networks_are_rejected_before_any_order(self):
         maker = FakeMaker()
         maker.network = "testnet"
-        with self.assertRaisesRegex(ValueError, "mainnet"):
+        with self.assertRaisesRegex(ValueError, "same network"):
             HedgeBot(HedgeConfig("arcus", "ETH", Decimal("0.1"), 1),
                      maker, FakeLighter())
         self.assertEqual(maker.orders, [])
 
-    async def test_unsupported_hedge_exchange_is_rejected(self):
-        with self.assertRaisesRegex(ValueError, "Unsupported hedge exchange"):
-            HedgeConfig("bulk", "ETH", Decimal("0.1"), 1, hedge_exchange="arcus")
+    async def test_arcus_can_be_selected_as_taker(self):
+        config = HedgeConfig("bulk", "ETH", Decimal("0.1"), 1, hedge_exchange="arcus")
+        maker, taker = FakeMaker(), FakeLighter()
+        bot = HedgeBot(config, maker, taker)
+        bot._notify = AsyncMock()
+        await bot.run()
+        self.assertEqual((maker.position, taker.position), (Decimal(0), Decimal(0)))
+        self.assertEqual(len(taker.orders), 2)
 
     async def test_hedge_client_must_implement_execution_capability(self):
         with self.assertRaisesRegex(TypeError, "does not support bounded market hedges"):

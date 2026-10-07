@@ -2,7 +2,7 @@
 
 [English](README_EN.md)
 
-本项目支持 **Bulk、Arcus、Lighter** 的单交易所模式，以及 **Bulk↔Lighter、Arcus↔Lighter** 对冲与价差收敛模式。`runbot.py` 在所选交易所挂开仓限价单，成交后按指定百分比挂止盈单，并监控订单、仓位和行情。单交易所模式没有止损或自动平仓退出机制。
+本项目支持 **Bulk、Arcus、Lighter** 的单交易所模式。对冲与价差收敛模式可选 Bulk/Arcus、Bulk/Lighter、Arcus/Lighter；目前 Bulk 和 Arcus 可做 maker，三家都可做 taker。`runbot.py` 在所选交易所挂开仓限价单，成交后按指定百分比挂止盈单，并监控订单、仓位和行情。单交易所模式没有止损或自动平仓退出机制。
 
 三家交易所的订单接口使用相同语义：订单 ID 可用于查询和撤单；订单数量是原始委托量，成交量是累计成交量，剩余量是尚未成交的数量；订单状态统一为 `OPEN`、`PARTIALLY_FILLED`、`FILLED`、`CANCELED` 或 `REJECTED`。下单回执只表示交易所接受了请求，实际成交以订单查询或推送为准。撤单只有在确认终态和累计成交量后才返回成功；无法确认的操作会停止自动下单并要求人工核查。Lighter 的订单 ID 使用客户端订单编号，其历史查询受交易所保留范围限制。
 
@@ -48,22 +48,23 @@ uv run --locked python runbot.py --exchange lighter --ticker ETH --direction buy
 
 ## 对冲模式
 
-`hedge_mode.py` 在 Bulk 或 Arcus 挂 maker 单，每次确认成交量后在 Lighter 下等量反向市价单。maker 单到 `--fill-timeout` 后会撤单，并依据确认的最终成交量补齐对冲；两腿仓位核对通过后才开始下一笔。已知订单 ID 的提交回执丢失、短暂查询失败或撤单回执丢失时，会在 `--recovery-timeout` 内核对订单与仓位，确认后继续；结果仍不明时停止新单并通过已配置的 Telegram/飞书渠道告警，不会盲目重发订单。
+`hedge_mode.py` 在 Bulk 或 Arcus 挂 maker 单，每次确认成交量后在所选 taker 交易所下等量反向即时单。maker 单到 `--fill-timeout` 后会撤单，并依据确认的最终成交量补齐对冲；两腿仓位核对通过后才开始下一笔。已知订单 ID 的提交回执丢失、短暂查询失败或撤单回执丢失时，会在 `--recovery-timeout` 内核对订单与仓位，确认后继续；结果仍不明时停止新单并通过已配置的 Telegram/飞书渠道告警，不会盲目重发订单。
 
-对冲腿由 `--hedge-exchange` 指定，默认且目前仅支持 `lighter`。对冲腿适配器需要支持精确数量校验、带滑点上限且不会留下活动挂单的即时对冲单，以及行情、活动订单和仓位查询；下单回执仍需由策略核对最终仓位。
+对冲腿由 `--hedge-exchange` 指定，默认为 `lighter`，也可选 `bulk` 或 `arcus`（不能与 maker 相同）。对冲腿适配器需要支持精确数量校验、带滑点上限且不会留下活动挂单的即时对冲单，以及行情、活动订单和仓位查询；下单回执仍需由策略核对最终仓位。
 
-Lighter 目前只连接主网，因此对冲模式要求 Bulk 或 Arcus **同样使用主网**。启动时要求两个账户在该市场无仓位、无活动订单。请分别配置两家的凭据，并先确认市场、额度、费用与 Lighter 保证金足以执行反向单。
+两腿必须连接相同网络；使用 Lighter 时另一腿必须在主网。启动时要求两个账户在该市场无仓位、无活动订单。请分别配置两家的凭据，并先确认市场、额度、费用与两边保证金足以执行反向单。
 
 ```bash
 uv run --locked python hedge_mode.py --exchange bulk --ticker ETH --size 0.1 --iter 2
 uv run --locked python hedge_mode.py --exchange arcus --hedge-exchange lighter --ticker ETH --size 0.1 --iter 2 --max-position 0.5
+uv run --locked python hedge_mode.py --exchange bulk --hedge-exchange arcus --ticker ETH --size 0.1 --iter 2
 ```
 
-`--size` 是每笔 maker 订单的标的数量；`--iter` 是循环次数。默认 `--max-position 0` 时，每轮从零仓位买入并对冲，再卖出回零。设置正值后，maker 仓位逐笔累积到 `+max-position`，再逐笔反向到 `-max-position`；最后一轮结束后回到零，两腿始终保持反向。`max-position` 必须是 `size` 的整数倍。`--max-slippage` 默认限制 Lighter 单笔市价对冲的价格偏离为 0.5%；`--target-timeout` 默认允许每个目标仓位最多等待 600 秒；`--recovery-timeout` 默认允许订单恢复核对 15 秒。程序退出时不会自动撤销未确认订单或强制平仓，需人工核对两个账户。
+`--size` 是每笔 maker 订单的标的数量；`--iter` 是循环次数。默认 `--max-position 0` 时，每轮从零仓位买入并对冲，再卖出回零。设置正值后，maker 仓位逐笔累积到 `+max-position`，再逐笔反向到 `-max-position`；最后一轮结束后回到零，两腿始终保持反向。`max-position` 必须是 `size` 的整数倍。`--max-slippage` 默认限制单笔 taker 订单的价格偏离为 0.5%；`--target-timeout` 默认允许每个目标仓位最多等待 600 秒；`--recovery-timeout` 默认允许订单恢复核对 15 秒。程序退出时不会自动撤销未确认订单或强制平仓，需人工核对两个账户。
 
 ## 策略架构
 
-新增的价差收敛策略使用独立的信号与风险计算、单笔限时 maker 执行器，并复用双腿部分成交对冲机制。首版支持 Bulk/Lighter 和 Arcus/Lighter；配置、启动和信号对比见 [价差策略说明](docs/spread-strategy.md)。
+价差收敛策略使用独立的信号与风险计算、单笔限时 maker 执行器，并复用双腿部分成交对冲机制。可使用上述三组交易所；配置、启动和信号对比见 [价差策略说明](docs/spread-strategy.md)。策略需要的交易所能力见 [能力接口说明](docs/exchange-capabilities.md)。
 
 `runbot.py` 运行 `TakeProfitStrategy`，`hedge_mode.py` 运行 `HedgeCycleStrategy`；原有 `TradingBot` 和 `HedgeBot` 名称仍可导入。两个策略共用 `StrategyRunner` 管理交易所连接、断开和异常处理，共用 `Notifier` 发送 Telegram/飞书通知。对冲策略通过 `MakerFirstPairExecutor` 执行目标仓位、确认部分成交和核对反向腿。交易所会话配置使用 `VenueConfig`，不再借用止盈策略的参数。
 

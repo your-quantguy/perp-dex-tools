@@ -6,10 +6,11 @@ from decimal import Decimal
 from typing import Protocol
 
 from exchanges.base import (
-    BaseExchangeClient, ExchangeConfig, HedgeExecutionClient,
+    ExchangeConfig,
     LIVE_ORDER_STATUSES, OrderInfo, OrderOutcomeUnknown, OrderResult,
     TERMINAL_ORDER_STATUSES,
 )
+from exchanges.capabilities import AuthoritativeOrderRecovery, PairMaker, PairTaker
 from helpers.logger import TradingLogger
 
 LIVE = LIVE_ORDER_STATUSES
@@ -39,8 +40,8 @@ class MakerFirstPairExecutor:
     """Reach a maker position target while keeping the opposite hedge leg aligned."""
 
     def __init__(
-        self, config: PairExecutionSettings, maker: BaseExchangeClient,
-        hedge: HedgeExecutionClient, maker_config: ExchangeConfig,
+        self, config: PairExecutionSettings, maker: PairMaker,
+        hedge: PairTaker, maker_config: ExchangeConfig,
         hedge_config: ExchangeConfig, logger: TradingLogger,
     ) -> None:
         self.config = config
@@ -144,9 +145,8 @@ class MakerFirstPairExecutor:
     async def _read_maker_order(self, order_id: str) -> OrderInfo | None:
         # Arcus's ordinary getter can return a cached live snapshot. Recovery
         # needs its authoritative REST read before placing another order.
-        recovery_read = getattr(self.maker, "get_order_for_recovery", None)
-        if self.config.exchange == "arcus" and recovery_read is not None:
-            return await recovery_read(order_id)
+        if isinstance(self.maker, AuthoritativeOrderRecovery):
+            return await self.maker.get_order_for_recovery(order_id)
         return await self.maker.get_order_info(order_id)
 
     async def _observe_maker_order(self, order: OrderInfo, order_id: str, side: str,
@@ -206,10 +206,8 @@ class MakerFirstPairExecutor:
         self.hedge.validate_hedge_quantity(quantity)
         try:
             if price is not None:
-                submit = getattr(self.maker, "place_post_only_order", None)
-                if submit is None:
-                    raise TypeError("Maker venue does not support an explicit post-only price")
-                result = await submit(self.maker_config.contract_id, quantity, price, side, reduce_only)
+                result = await self.maker.place_post_only_order(
+                    self.maker_config.contract_id, quantity, price, side, reduce_only)
             elif reduce_only:
                 bid, ask = await self.maker.fetch_bbo_prices(self.maker_config.contract_id)
                 if bid <= 0 or ask <= 0 or bid >= ask:

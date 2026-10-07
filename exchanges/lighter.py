@@ -40,6 +40,17 @@ class LighterClient(BaseExchangeClient):
 
     ORDER_CONFIRM_TIMEOUT = 10
 
+    @property
+    def network_id(self) -> str:
+        return "mainnet"
+
+    def get_quantity_step(self) -> Decimal:
+        base_multiplier, _ = self._multipliers()
+        return Decimal(1) / Decimal(base_multiplier)
+
+    def get_account_description(self) -> tuple[str, ...]:
+        return (f"Account index: {self.account_index}", f"API key index: {self.api_key_index}")
+
     def __init__(self, config: ExchangeConfig):
         """Initialize Lighter client."""
         super().__init__(config)
@@ -289,7 +300,7 @@ class LighterClient(BaseExchangeClient):
         return best_bid, best_ask
 
     async def get_spread_book(self, contract_id: MarketId):
-        from strategies.spread_model import BookSnapshot
+        from exchanges.market import BookSnapshot
 
         if contract_id != self.config.contract_id or not hasattr(self, "ws_manager"):
             raise ConnectionError("Lighter order book is unavailable")
@@ -302,7 +313,7 @@ class LighterClient(BaseExchangeClient):
             return BookSnapshot(bids, asks, manager.book_updated_at)
 
     async def get_spread_risk(self):
-        from strategies.spread_model import AccountRisk
+        from exchanges.market import AccountRisk
 
         response = await AccountApi(self.api_client).account(by="index", value=str(self.account_index))
         if not response or not response.accounts:

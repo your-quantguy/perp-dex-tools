@@ -243,6 +243,23 @@ class ArcusTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.filled_size, Decimal("0.02"))
         self.assertEqual(len(self.events), 1)
 
+    async def test_taker_submits_bounded_ioc(self):
+        self.config.contract_id = "ETH-USD"
+        self.client.fetch_bbo_prices = AsyncMock(return_value=(Decimal("2699"), Decimal("2700")))
+        order = self.client._remember(self.raw("ioc", "FILLED", "0"))
+        self.client._confirm = AsyncMock(return_value=order)
+        self.client._request = AsyncMock(return_value={"orderId": "ioc"})
+        result = await self.client.place_hedge_market_order(
+            Decimal("0.02"), "buy", Decimal("0.5"))
+        self.assertTrue(result.success)
+        request_call = self.client._request.await_args
+        assert request_call is not None
+        body = request_call.kwargs["json"]
+        self.assertEqual(body["orderType"], "LIMIT")
+        self.assertEqual(body["timeInForce"], "IOC")
+        self.assertFalse(body["reduceOnly"])
+        self.assertLessEqual(Decimal(body["price"]), Decimal("2713.5"))
+
     async def test_ack_is_not_success_until_confirmed(self):
         self.client._request = AsyncMock(return_value={"orderId": "new", "status": "ACK"})
         self.client._confirm = AsyncMock(side_effect=ValueError("bad state"))

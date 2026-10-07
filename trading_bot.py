@@ -5,19 +5,15 @@ import asyncio
 import traceback
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import TYPE_CHECKING, Optional, cast
+from typing import Optional
 
 from exchanges import ExchangeFactory
 from exchanges.base import OrderOutcomeUnknown
+from exchanges.capabilities import AccountDescription, AuthoritativeOrderRecovery, TakeProfitVenue
 from exchanges.config import VenueConfig
 from helpers import TradingLogger
 from helpers.notifications import Notifier
 from strategies.runner import StrategyRunner, VenueLifecycle
-
-if TYPE_CHECKING:
-    from exchanges.arcus import ArcusClient
-    from exchanges.bulk import BulkClient
-
 
 @dataclass
 class TakeProfitConfig(VenueConfig):
@@ -60,10 +56,13 @@ class TakeProfitStrategy:
 
         # Create exchange client
         try:
-            self.exchange_client = ExchangeFactory.create_exchange(
+            selected = ExchangeFactory.create_exchange(
                 config.exchange,
                 config
             )
+            if not isinstance(selected, TakeProfitVenue):
+                raise TypeError(f"{config.exchange} lacks take-profit order and position capabilities")
+            self.exchange_client = selected
         except ValueError as e:
             raise ValueError(f"Failed to create exchange client: {e}")
 
@@ -241,11 +240,9 @@ class TakeProfitStrategy:
                     self.logger.log(f"Order alert failed: {notify_exc}", "WARNING")
                 raise
             # A timed-out Bulk submit may already be live. A rejected close is not.
-            if self.config.exchange in {"bulk", "arcus"} and (
-                "outcome is unknown" in str(e)
-                or "recovery needs attention" in str(e)
-                or (self._bulk_open_order_id and isinstance(e, (ConnectionError, TimeoutError)))
-            ):
+            if ("outcome is unknown" in str(e)
+                    or "recovery needs attention" in str(e)
+                    or (self._bulk_open_order_id and isinstance(e, (ConnectionError, TimeoutError)))):
                 raise
             return False
         finally:
@@ -253,63 +250,65 @@ class TakeProfitStrategy:
             self._bulk_waiting_for_open_ack = False
             self._bulk_early_open_updates.clear()
 
-    async def _recover_arcus_open_order(self, order_id):
+    async def _recover_open_order(self, order_id):
         """Pause on stale quotes without forgetting an already submitted order."""
+        if not isinstance(self.exchange_client, AuthoritativeOrderRecovery):
+            raise TypeError("Exchange cannot provide an authoritative recovery read")
         started = time.monotonic()
         next_alert = started + 30
         warned_fill = False
-        self.logger.log(f"[OPEN] [{order_id}] Arcus market data unavailable; pausing order changes", "WARNING")
+        self.logger.log(f"[OPEN] [{order_id}] Market data unavailable; pausing order changes", "WARNING")
         while not self.shutdown_requested:
             try:
-                order = await cast("ArcusClient", self.exchange_client).get_order_for_recovery(order_id)
+                order = await self.exchange_client.get_order_for_recovery(order_id)
                 if order.filled_size > 0 and not warned_fill:
                     warned_fill = True
-                    message = (f"[OPEN] [{order_id}] Filled {order.filled_size} while Arcus market data "
+                    message = (f"[OPEN] [{order_id}] Filled {order.filled_size} while market data "
                                "is recovering; take-profit placement is pending")
                     self.logger.log(message, "ERROR")
                     try:
                         await self.send_notification(message)
                     except Exception as exc:
-                        self.logger.log(f"Arcus recovery notification failed: {exc}", "WARNING")
+                        self.logger.log(f"Order recovery notification failed: {exc}", "WARNING")
                 if order.status in {"CANCELED", "REJECTED"} and order.filled_size == 0:
                     self.logger.log(f"[OPEN] [{order_id}] Confirmed {order.status}; no fill to close", "INFO")
                     return None, order
                 price = await self.exchange_client.get_order_price(self.config.direction)
-                self.logger.log(f"[OPEN] [{order_id}] Arcus market data and order state recovered", "INFO")
+                self.logger.log(f"[OPEN] [{order_id}] Market data and order state recovered", "INFO")
                 return price, order
             except (ConnectionError, TimeoutError, OSError) as exc:
                 if time.monotonic() >= next_alert:
-                    message = (f"[OPEN] [{order_id}] Arcus recovery pending: {exc}; "
+                    message = (f"[OPEN] [{order_id}] Order recovery pending: {exc}; "
                                "no new opening orders will be submitted")
                     self.logger.log(message, "ERROR")
                     try:
                         await self.send_notification(message)
                     except Exception as notify_exc:
-                        self.logger.log(f"Arcus recovery notification failed: {notify_exc}", "WARNING")
+                        self.logger.log(f"Order recovery notification failed: {notify_exc}", "WARNING")
                     next_alert = time.monotonic() + 60
                 await asyncio.sleep(5)
             except RuntimeError as exc:
                 if "recovery needs attention" not in str(exc):
                     raise
                 if time.monotonic() >= next_alert:
-                    message = (f"[OPEN] [{order_id}] Arcus order state needs manual attention: {exc}; "
+                    message = (f"[OPEN] [{order_id}] Order state needs manual attention: {exc}; "
                                "no new opening orders will be submitted")
                     self.logger.log(message, "ERROR")
                     try:
                         await self.send_notification(message)
                     except Exception as notify_exc:
-                        self.logger.log(f"Arcus recovery notification failed: {notify_exc}", "WARNING")
+                        self.logger.log(f"Order recovery notification failed: {notify_exc}", "WARNING")
                     next_alert = time.monotonic() + 60
                 await asyncio.sleep(5)
-        raise RuntimeError(f"Arcus order {order_id} remains unresolved during shutdown")
+        raise RuntimeError(f"Order {order_id} remains unresolved during shutdown")
 
     async def _get_monitored_open_price(self, order_id):
         try:
             return await self.exchange_client.get_order_price(self.config.direction), None
         except (ConnectionError, TimeoutError):
-            if self.config.exchange != "arcus":
+            if not isinstance(self.exchange_client, AuthoritativeOrderRecovery):
                 raise
-            return await self._recover_arcus_open_order(order_id)
+            return await self._recover_open_order(order_id)
 
     async def _place_close_after_open(self, order_id, quantity, price, side):
         while True:
@@ -318,14 +317,14 @@ class TakeProfitStrategy:
                     self.config.contract_id, quantity, price, side
                 )
             except (ConnectionError, TimeoutError):
-                if self.config.exchange != "arcus":
+                if not isinstance(self.exchange_client, AuthoritativeOrderRecovery):
                     raise
-                # Arcus raises these only before submitting the close order.
-                # Never retry an ambiguous POST acknowledgement.
-                _, order = await self._recover_arcus_open_order(order_id)
+                # Adapter contracts raise OrderOutcomeUnknown after an ambiguous
+                # submission; these transient errors are pre-submit failures.
+                _, order = await self._recover_open_order(order_id)
                 if order.filled_size < quantity:
                     raise RuntimeError(
-                        f"Arcus recovery needs attention: opening order {order_id} "
+                        f"Order recovery needs attention: opening order {order_id} "
                         f"confirms only {order.filled_size}, expected at least {quantity}"
                     )
 
@@ -434,7 +433,7 @@ class TakeProfitStrategy:
                         self.active_close_orders.append({
                             'id': order.order_id,
                             'price': order.price,
-                            'size': order.remaining_size if self.config.exchange in {"bulk", "arcus"} else order.size
+                            'size': order.remaining_size
                         })
 
                 # Get positions
@@ -555,18 +554,9 @@ class TakeProfitStrategy:
         self.logger.log(f"Max Orders: {self.config.max_orders}", "INFO")
         self.logger.log(f"Wait Time: {self.config.wait_time}s", "INFO")
         self.logger.log(f"Exchange: {self.config.exchange}", "INFO")
-        if self.config.exchange == "bulk":
-            bulk = cast("BulkClient", self.exchange_client)
-            mode = "agent" if bulk.uses_agent_wallet else "owner"
-            self.logger.log(f"Bulk Signing Mode: {mode}", "INFO")
-            self.logger.log(f"Bulk Trading Account: {bulk.public_key}", "INFO")
-            self.logger.log(f"Bulk Signer: {bulk.signer_public_key}", "INFO")
-        if self.config.exchange == "arcus":
-            arcus = cast("ArcusClient", self.exchange_client)
-            self.logger.log(f"Arcus Network: {arcus.network}", "INFO")
-            self.logger.log(f"Arcus Trading Account: {arcus.address}", "INFO")
-            self.logger.log(f"Arcus Subaccount: {arcus.account_index}", "INFO")
-            self.logger.log(f"Arcus API Key: {arcus.api_key}", "INFO")
+        if isinstance(self.exchange_client, AccountDescription):
+            for line in self.exchange_client.get_account_description():
+                self.logger.log(line, "INFO")
         self.logger.log(f"Grid Step: {self.config.grid_step}%", "INFO")
         self.logger.log(f"Stop Price: {self.config.stop_price}", "INFO")
         self.logger.log(f"Pause Price: {self.config.pause_price}", "INFO")

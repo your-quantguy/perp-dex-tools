@@ -4,7 +4,7 @@ All exchange implementations should inherit from this class.
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, List, Optional, Protocol, Tuple, Type, Union, runtime_checkable
+from typing import Any, Optional, Protocol, Tuple, Type, Union
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
 from tenacity import RetryCallState, retry, retry_if_exception_type, stop_after_attempt, wait_exponential
@@ -90,40 +90,13 @@ class OrderInfo:
     cancel_reason: str = ''
 
 
-@runtime_checkable
-class HedgeExecutionClient(Protocol):
-    """Exchange capabilities required for the taker leg of a position hedge.
-
-    An accepted market order is not a confirmed fill. The caller must check
-    the resulting position and avoid resubmitting an ambiguous request.
-    """
-
-    def setup_order_update_handler(self, handler) -> None: ...
-    async def get_contract_attributes(self) -> tuple[MarketId, Decimal]: ...
-    async def connect(self) -> None: ...
-    async def disconnect(self) -> None: ...
-    async def fetch_bbo_prices(self, contract_id: MarketId) -> tuple[Decimal, Decimal]: ...
-    async def get_active_orders(self, contract_id: MarketId) -> list[OrderInfo]: ...
-    async def get_account_positions(self) -> Decimal: ...
-
-    def validate_hedge_quantity(self, quantity: Decimal) -> None:
-        """Reject quantities that cannot be submitted exactly on this market."""
-        ...
-
-    async def place_hedge_market_order(
-        self, quantity: Decimal, side: str, max_slippage_percent: Decimal,
-        reduce_only: bool = False,
-    ) -> OrderResult:
-        """Submit a bounded immediate order that cannot leave a resting order.
-
-        Return success only for confirmed exchange acceptance. Raise
-        OrderOutcomeUnknown if a request may have reached the exchange.
-        """
-        ...
-
-
 class BaseExchangeClient(ABC):
-    """Base class for all exchange clients."""
+    """Minimal exchange session and market-data base.
+
+    Order capabilities are structural protocols in ``exchanges.capabilities``.
+    They are intentionally absent here, so an adapter cannot appear to support
+    a strategy simply by inheriting methods that raise NotImplementedError.
+    """
 
     def __init__(self, config: ExchangeConfig):
         """Initialize the exchange client with configuration."""
@@ -153,40 +126,6 @@ class BaseExchangeClient(ABC):
         pass
 
     @abstractmethod
-    async def place_open_order(self, contract_id: MarketId, quantity: Decimal, direction: str) -> OrderResult:
-        """Place an open order."""
-        pass
-
-    @abstractmethod
-    async def place_close_order(self, contract_id: MarketId, quantity: Decimal, price: Decimal, side: str) -> OrderResult:
-        """Place a close order."""
-        pass
-
-    @abstractmethod
-    async def cancel_order(self, order_id: str) -> OrderResult:
-        """Cancel an order."""
-        pass
-
-    @abstractmethod
-    async def get_order_info(self, order_id: str) -> Optional[OrderInfo]:
-        """Get this order, not a position-derived guess.
-
-        None means absent from the exchange's available order history; it is
-        not proof that a timed-out submission was rejected. Read errors raise.
-        """
-        pass
-
-    @abstractmethod
-    async def get_active_orders(self, contract_id: MarketId) -> List[OrderInfo]:
-        """Get active orders for a contract."""
-        pass
-
-    @abstractmethod
-    async def get_account_positions(self) -> Decimal:
-        """Get account positions."""
-        pass
-
-    @abstractmethod
     async def get_contract_attributes(self) -> Tuple[MarketId, Decimal]:
         """Get the configured market identifier and price tick."""
         pass
@@ -194,11 +133,6 @@ class BaseExchangeClient(ABC):
     @abstractmethod
     async def fetch_bbo_prices(self, contract_id: MarketId) -> Tuple[Decimal, Decimal]:
         """Get the best bid and ask."""
-        pass
-
-    @abstractmethod
-    async def get_order_price(self, direction: str) -> Decimal:
-        """Get the next maker price for an order direction."""
         pass
 
     @abstractmethod

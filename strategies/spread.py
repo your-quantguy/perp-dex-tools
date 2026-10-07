@@ -7,19 +7,20 @@ import time
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import Protocol, cast, runtime_checkable
+from typing import Protocol
 
 import aiohttp
 
 from exchanges import ExchangeFactory
-from exchanges.base import HedgeExecutionClient, OrderResult
+from exchanges.capabilities import SpreadMaker, SpreadTaker
 from exchanges.config import VenueConfig
+from exchanges.market import AccountRisk, BookSnapshot
 from execution.pair import MakerFirstPairExecutor
 from helpers import TradingLogger
 from helpers.notifications import Notifier
 from strategies.runner import StrategyRunner
 from strategies.spread_model import (
-    BPS, AccountRisk, BookSnapshot, basis_bps, closing_signal, common_size_step, opening_signal,
+    BPS, basis_bps, closing_signal, common_size_step, opening_signal,
     opposite_band_exit, rounded_size,
 )
 
@@ -67,10 +68,9 @@ class SpreadConfig:
         return self.venue_b if self.maker_exchange == self.venue_a else self.venue_a
 
     def __post_init__(self) -> None:
-        if {self.venue_a, self.venue_b} not in ({"bulk", "lighter"}, {"arcus", "lighter"}):
-            raise ValueError("Live spread strategy supports Bulk/Lighter or Arcus/Lighter")
-        if self.maker_exchange not in {"bulk", "arcus"} or self.hedge_exchange != "lighter":
-            raise ValueError("This maker-taker executor requires Bulk or Arcus maker and Lighter taker")
+        if (not self.venue_a or not self.venue_b or self.venue_a == self.venue_b
+                or self.maker_exchange not in {self.venue_a, self.venue_b}):
+            raise ValueError("Choose two distinct venues and designate one as maker")
         if self.execution_mode != "maker_taker":
             raise ValueError("Only maker_taker execution is implemented")
         if self.exit_rule not in {"center", "opposite_band"}:
@@ -118,24 +118,15 @@ class SpreadExecution(Protocol):
                            reduce_only: bool) -> Decimal: ...
 
 
-@runtime_checkable
-class SpreadDataClient(Protocol):
-    async def get_spread_book(self, contract_id) -> BookSnapshot: ...
-    async def get_spread_risk(self) -> AccountRisk: ...
-
-
-@runtime_checkable
-class SpreadMakerClient(SpreadDataClient, Protocol):
-    async def place_reduce_only_ioc(self, contract_id, quantity: Decimal, side: str,
-                                     max_slippage_percent: Decimal) -> OrderResult: ...
-
-
 class MakerTakerExecution:
     """One expiring post-only attempt, reusing partial-fill reconciliation."""
 
-    def __init__(self, pair: MakerFirstPairExecutor, config: SpreadConfig):
+    def __init__(self, pair: MakerFirstPairExecutor, config: SpreadConfig,
+                 maker: SpreadMaker, taker: SpreadTaker):
         self.pair = pair
         self.config = config
+        self.maker = maker
+        self.taker = taker
 
     @staticmethod
     def _depth(book: BookSnapshot, side: str, limit_percent: Decimal) -> Decimal:
@@ -145,11 +136,7 @@ class MakerTakerExecution:
                     if (p <= bound if side == "buy" else p >= bound)), Decimal(0))
 
     def _step(self) -> Decimal:
-        maker_step = getattr(self.pair.maker, "_lot_size", None) or getattr(self.pair.maker, "step", None)
-        hedge_multiplier = getattr(self.pair.hedge, "base_amount_multiplier", None)
-        if not maker_step or not hedge_multiplier:
-            raise RuntimeError("Venue quantity precision is unavailable")
-        return common_size_step(Decimal(str(maker_step)), Decimal(1) / Decimal(hedge_multiplier))
+        return common_size_step(self.maker.get_quantity_step(), self.taker.get_quantity_step())
 
     async def quote(self, maker_side: str, quantity_limit: Decimal,
                     maker_book: BookSnapshot, hedge_book: BookSnapshot) -> SpreadQuote | None:
@@ -163,7 +150,7 @@ class MakerTakerExecution:
         quantity = rounded_size(quantity, self._step()) if quantity > 0 else Decimal(0)
         if quantity <= 0:
             return None
-        maker_price = await self.pair.maker.get_order_price(maker_side)
+        maker_price = await self.maker.get_order_price(maker_side)
         if time.monotonic() - hedge_book.observed_at > self.config.max_book_age:
             return None
         if hedge_book.sweep(hedge_side, quantity, self.config.max_slippage) is None:
@@ -188,23 +175,21 @@ class SpreadStrategy:
         self.logger = TradingLogger("spread", config.ticker, log_to_console=True)
         self.maker_config = VenueConfig(config.ticker, "", Decimal(0), config.size, "buy")
         self.hedge_config = VenueConfig(config.ticker, "", Decimal(0), config.size, "sell")
-        self.maker = maker or ExchangeFactory.create_exchange(config.maker_exchange, self.maker_config)
-        selected = hedge or ExchangeFactory.create_exchange(config.hedge_exchange, self.hedge_config)
-        if not isinstance(selected, HedgeExecutionClient):
-            raise TypeError("Taker venue lacks bounded immediate orders")
-        self.hedge = selected
-        maker_capability = self.maker
-        hedge_capability = self.hedge
-        if not isinstance(maker_capability, SpreadMakerClient) or not isinstance(hedge_capability, SpreadDataClient):
-            raise TypeError("Spread venue lacks depth, risk or emergency-close capabilities")
-        network = getattr(self.maker, "signature_domain", None) or getattr(self.maker, "network", "mainnet")
-        if network != "mainnet":
-            raise ValueError("Both spread venues must be on mainnet")
+        selected_maker = maker or ExchangeFactory.create_exchange(config.maker_exchange, self.maker_config)
+        selected_hedge = hedge or ExchangeFactory.create_exchange(config.hedge_exchange, self.hedge_config)
+        if not isinstance(selected_maker, SpreadMaker):
+            raise TypeError(f"{config.maker_exchange} lacks spread maker, risk or emergency-close capabilities")
+        if not isinstance(selected_hedge, SpreadTaker):
+            raise TypeError(f"{config.hedge_exchange} lacks bounded taker, depth or risk capabilities")
+        self.maker = selected_maker
+        self.hedge = selected_hedge
+        if self.maker.network_id != self.hedge.network_id:
+            raise ValueError("Spread venues must use the same network")
         self.maker.setup_order_update_handler(lambda _message: None)
         self.hedge.setup_order_update_handler(lambda _message: None)
         self.pair = MakerFirstPairExecutor(config, self.maker, self.hedge,
                                            self.maker_config, self.hedge_config, self.logger)
-        self.execution: SpreadExecution = MakerTakerExecution(self.pair, config)
+        self.execution: SpreadExecution = MakerTakerExecution(self.pair, config, self.maker, self.hedge)
         self.notifier = notifier or Notifier()
         self.position = SpreadPosition()
         self._warning_sent = False
@@ -276,15 +261,15 @@ class SpreadStrategy:
             self._data_warning_sent = True
 
     async def _books(self) -> tuple[BookSnapshot, BookSnapshot, Decimal]:
-        maker_book = await cast(SpreadMakerClient, self.maker).get_spread_book(self.maker_config.contract_id)
-        hedge_book = await cast(SpreadDataClient, self.hedge).get_spread_book(self.hedge_config.contract_id)
+        maker_book = await self.maker.get_spread_book(self.maker_config.contract_id)
+        hedge_book = await self.hedge.get_spread_book(self.hedge_config.contract_id)
         a, b = ((maker_book, hedge_book) if self.config.venue_a == self.config.maker_exchange
                 else (hedge_book, maker_book))
         return maker_book, hedge_book, basis_bps(a, b, self.config.max_book_age, self.config.max_book_skew)
 
     async def _risks(self) -> tuple[AccountRisk, AccountRisk, Decimal]:
-        maker = await cast(SpreadMakerClient, self.maker).get_spread_risk()
-        hedge = await cast(SpreadDataClient, self.hedge).get_spread_risk()
+        maker = await self.maker.get_spread_risk()
+        hedge = await self.hedge.get_spread_risk()
         a, b = ((maker, hedge) if self.config.venue_a == self.config.maker_exchange
                 else (hedge, maker))
         buffer = min(a.buffer_fraction(self.config.maintenance_fraction_a),
@@ -305,7 +290,7 @@ class SpreadStrategy:
             if await self.hedge.get_active_orders(self.hedge_config.contract_id):
                 raise RuntimeError("Active hedge order blocks emergency close; manual review required")
             side = "sell" if current > 0 else "buy"
-            result = await cast(SpreadMakerClient, self.maker).place_reduce_only_ioc(
+            result = await self.maker.place_reduce_only_ioc(
                 self.maker_config.contract_id, abs(current), side, self.config.max_slippage)
             # IOC finality and account state must be known before any repeat.
             if result.order_id:

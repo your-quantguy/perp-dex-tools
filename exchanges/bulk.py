@@ -10,7 +10,7 @@ import json
 import logging
 import os
 import time
-from decimal import Decimal
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, cast
 
 import aiohttp
@@ -26,6 +26,24 @@ logger = logging.getLogger(__name__)
 
 
 class BulkClient(BaseExchangeClient):
+    @property
+    def network_id(self) -> str:
+        return self.signature_domain
+
+    def get_quantity_step(self) -> Decimal:
+        if self._lot_size <= 0:
+            raise RuntimeError("Bulk market quantity step is unavailable")
+        return self._lot_size
+
+    def get_account_description(self) -> tuple[str, ...]:
+        mode = "agent" if self.uses_agent_wallet else "owner"
+        return (f"Signing mode: {mode}", f"Trading account: {self.public_key}",
+                f"Signer: {self.signer_public_key}")
+
+    def validate_hedge_quantity(self, quantity: Decimal) -> None:
+        if not quantity.is_finite() or quantity <= 0 or self._lot_size <= 0 or quantity % self._lot_size:
+            raise ValueError(f"Bulk cannot represent exact hedge quantity {quantity}")
+
     # Website accounts live on mainnet. The exchange-api / exchange-ws1 hosts are testnet.
     API_URL = "https://mainnet-api1.bulk.trade/api/v1"
     WS_URL = "wss://mainnet-ws1.bulk.trade"
@@ -376,13 +394,13 @@ class BulkClient(BaseExchangeClient):
         self._book_update_time = time.monotonic()
 
     async def get_spread_book(self, contract_id: str):
-        from strategies.spread_model import BookSnapshot
+        from exchanges.market import BookSnapshot
 
         await self.fetch_bbo_prices(contract_id)
         return BookSnapshot(self._depth_bids, self._depth_asks, self._book_update_time)
 
     async def get_spread_risk(self):
-        from strategies.spread_model import AccountRisk
+        from exchanges.market import AccountRisk
 
         account = await self._account()
         if any(position.get("iso") for position in account["positions"]):
@@ -616,7 +634,30 @@ class BulkClient(BaseExchangeClient):
         bid, ask = await self.fetch_bbo_prices(contract_id)
         factor = max_slippage_percent / 100
         price = ask * (1 + factor) if side == "buy" else bid * (1 - factor)
-        return await self._place_limit(quantity, self.round_to_tick(price), side, True, tif="IOC")
+        return await self._place_limit(quantity, self._bounded_ioc_price(price, side), side, True, tif="IOC")
+
+    def _bounded_ioc_price(self, price: Decimal, side: str) -> Decimal:
+        tick = self.config.tick_size
+        if tick <= 0:
+            raise RuntimeError("Bulk market price tick is unavailable")
+        rounding = ROUND_FLOOR if side == "buy" else ROUND_CEILING
+        return (price / tick).to_integral_value(rounding=rounding) * tick
+
+    async def place_hedge_market_order(self, quantity: Decimal, side: str,
+                                       max_slippage_percent: Decimal,
+                                       reduce_only: bool = False) -> OrderResult:
+        """Bounded IOC limit order; the caller confirms its resulting position."""
+        if side not in {"buy", "sell"} or not Decimal(0) < max_slippage_percent <= Decimal(5):
+            raise ValueError("Invalid Bulk taker side or slippage limit")
+        self.validate_hedge_quantity(quantity)
+        bid, ask = await self.fetch_bbo_prices(str(self.config.contract_id))
+        factor = max_slippage_percent / 100
+        protection = ask * (1 + factor) if side == "buy" else bid * (1 - factor)
+        result = await self._place_limit(quantity, self._bounded_ioc_price(protection, side),
+                                         side, reduce_only, tif="IOC")
+        if result.order_id and result.status == "CANCELED" and result.filled_size:
+            result.success = True
+        return result
 
     async def place_close_order(self, contract_id: str, quantity: Decimal, price: Decimal, side: str) -> OrderResult:
         """Retry a post-only close when the book has already traded through the target."""
