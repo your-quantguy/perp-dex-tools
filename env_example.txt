@@ -68,9 +68,24 @@ STANDX_PRIVATE_KEY=your_wallet_private_key_here
 STANDX_CHAIN=bsc  # or solana
 
 # Notification (optional)
-# guide: https://www.feishu.cn/hc/zh-CN/articles/185289387886-%E6%B6%88%E6%81%AF%E5%8A%A9%E6%89%8B-%E6%9C%BA%E5%99%A8%E4%BA%BA
+
+# 🆕 飞书通知方式 1: 群自定义机器人 Webhook（推荐，无需后台配置）
+# 优点: 支持富文本卡片、颜色、图标等，代码中直接控制样式
+# 配置步骤:
+#   1. 在飞书群中添加自定义机器人
+#   2. 选择"自定义机器人"，获取 Webhook URL
+#   3. (可选) 配置关键词验证，如果设置了关键词，需要在 LARK_WEBHOOK_KEYWORD 中配置
+#   4. 复制 Webhook URL 到下面
+# 格式: https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxx
+LARK_WEBHOOK_URL=
+LARK_WEBHOOK_KEYWORD=  # 可选，如果机器人配置了关键词验证
+
+# 飞书通知方式 2: 流程 Webhook（旧方式，需要后台配置）
+# 缺点: 需要在飞书后台配置流程和字段解析，样式固定
+# guide: https://www.feishu.cn/hc/zh-CN/articles/185289387886
 LARK_TOKEN=
 
+# Telegram 通知
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 

@@ -16,13 +16,14 @@ from exchanges import ExchangeFactory
 
 def parse_arguments():
     """Parse command line arguments."""
+    supported_exchanges = ExchangeFactory.get_supported_exchanges()
     parser = argparse.ArgumentParser(description='Modular Trading Bot - Supports multiple exchanges')
 
     # Exchange selection
     parser.add_argument('--exchange', type=str, default='edgex',
-                        choices=ExchangeFactory.get_supported_exchanges(),
+                        choices=supported_exchanges,
                         help='Exchange to use (default: edgex). '
-                             f'Available: {", ".join(ExchangeFactory.get_supported_exchanges())}')
+                             f'Available: {", ".join(supported_exchanges)}')
 
     # Trading parameters
     parser.add_argument('--ticker', type=str, default='ETH',
@@ -41,12 +42,16 @@ def parse_arguments():
                         help=".env file path (default: .env)")
     parser.add_argument('--grid-step', type=str, default='-100',
                         help='The minimum distance in percentage to the next close order price (default: -100)')
+    parser.add_argument('--instance-id', type=str, default='default',
+                        help="Instance identifier to distinguish between different script instances (default: default)")
     parser.add_argument('--stop-price', type=Decimal, default=-1,
                         help='Price to stop trading and exit. Buy: exits if price >= stop-price.'
                         'Sell: exits if price <= stop-price. (default: -1, no stop)')
     parser.add_argument('--pause-price', type=Decimal, default=-1,
                         help='Pause trading and wait. Buy: pause if price >= pause-price.'
                         'Sell: pause if price <= pause-price. (default: -1, no pause)')
+    parser.add_argument('--stop-loss', type=Decimal, default=-1,
+                        help='Stop-loss percentage (e.g., 0.4 = 0.4%% loss). Places a stop-loss order automatically. (default: -1, no stop-loss)')
     parser.add_argument('--boost', action='store_true',
                         help='Use the Boost mode for volume boosting')
 
@@ -114,8 +119,10 @@ async def main():
         wait_time=args.wait_time,
         exchange=args.exchange.lower(),
         grid_step=Decimal(args.grid_step),
+        instance_id=args.instance_id,
         stop_price=Decimal(args.stop_price),
         pause_price=Decimal(args.pause_price),
+        stop_loss=Decimal(args.stop_loss),
         boost_mode=args.boost
     )
 
@@ -128,6 +135,14 @@ async def main():
         # The bot's run method already handles graceful shutdown
         return
 
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except RuntimeError as e:
+        if "asyncio.run() cannot be called from a running event loop" in str(e):
+            # If we're already in an event loop, just await the main function
+            import asyncio
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(main())
+        else:
+            raise

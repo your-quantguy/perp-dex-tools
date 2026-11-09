@@ -16,7 +16,7 @@ cryptography>=41.0.0
 bpx-py==2.0.11
 
 # Forked edgeX official python sdk with post_only limit order
-git+https://github.com/your-quantguy/edgex-python-sdk.git@07425f7522be5845399264682580c88019ab9e52#egg=edgex-python-sdk
+git+https://github.com/zFDT/edgex-python-sdk.git@07425f7522be5845399264682580c88019ab9e52#egg=edgex-python-sdk
 
 # tools
 tenacity>=9.1.2

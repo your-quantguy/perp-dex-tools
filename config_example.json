@@ -1,0 +1,40 @@
+{
+  "exchange": "backpack",
+  "env_file": ".env",
+  "common_params": {
+    "take_profit": 0.02,
+    "direction": "sell",
+    "max_orders": 10,
+    "wait_time": 450,
+    "grid_step": 0.2,
+    "stop_price": -1,
+    "pause_price": -1,
+    "boost_mode": false
+  },
+  "tickers": [
+    {
+      "ticker": "SOL",
+      "quantity": 0.5,
+      "instance_id": "SOL_hao"
+    },
+    {
+      "ticker": "BTC",
+      "quantity": 0.01,
+      "instance_id": "BTC_hao",
+      "take_profit": 0.03,
+      "direction": "buy"
+    },
+    {
+      "ticker": "ETH",
+      "quantity": 0.1,
+      "instance_id": "ETH_hao"
+    },
+    {
+      "ticker": "SUI",
+      "quantity": 1.0,
+      "instance_id": "SUI_hao",
+      "max_orders": 15,
+      "grid_step": 0.3
+    }
+  ]
+}

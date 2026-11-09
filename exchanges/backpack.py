@@ -81,7 +81,17 @@ class BackpackWebSocketManager:
 
             except Exception as e:
                 if self.logger:
-                    self.logger.log(f"WebSocket connection error: {e}", "ERROR")
+                    # Instead of calling logger.log directly, which might cause asyncio.run issues,
+                    # we'll print the error to console and log file if possible
+                    error_message = f"WebSocket connection error: {e}"
+                    print(f"[ERROR] [{self.logger.exchange.upper()}_{self.logger.ticker.upper()}] {error_message}")
+                    # Try to log to file directly if logger is available
+                    try:
+                        self.logger.logger.error(f"[{self.logger.exchange.upper()}_{self.logger.ticker.upper()}] {error_message}")
+                    except:
+                        pass  # If we can't log to file, at least we printed to console
+                # Re-raise the exception to be handled by the calling code
+                raise
 
     async def _listen(self):
         """Listen for WebSocket messages."""
@@ -331,55 +341,66 @@ class BackpackClient(BaseExchangeClient):
 
         while retry_count < max_retries:
             retry_count += 1
+            try:
+                best_bid, best_ask = await self.fetch_bbo_prices(contract_id)
 
-            best_bid, best_ask = await self.fetch_bbo_prices(contract_id)
+                if best_bid <= 0 or best_ask <= 0:
+                    return OrderResult(success=False, error_message='Invalid bid/ask prices')
 
-            if best_bid <= 0 or best_ask <= 0:
-                return OrderResult(success=False, error_message='Invalid bid/ask prices')
+                if direction == 'buy':
+                    # For buy orders, place slightly below best ask to ensure execution
+                    order_price = best_ask - self.config.tick_size
+                    side = 'Bid'
+                else:
+                    # For sell orders, place slightly above best bid to ensure execution
+                    order_price = best_bid + self.config.tick_size
+                    side = 'Ask'
 
-            if direction == 'buy':
-                # For buy orders, place slightly below best ask to ensure execution
-                order_price = best_ask - self.config.tick_size
-                side = 'Bid'
-            else:
-                # For sell orders, place slightly above best bid to ensure execution
-                order_price = best_bid + self.config.tick_size
-                side = 'Ask'
+                # Place the order using Backpack SDK (post-only to ensure maker order)
+                order_result = self.account_client.execute_order(
+                    symbol=contract_id,
+                    side=side,
+                    order_type=OrderTypeEnum.LIMIT,
+                    quantity=str(quantity),
+                    price=str(self.round_to_tick(order_price)),
+                    post_only=True,
+                    time_in_force=TimeInForceEnum.GTC
+                )
 
-            # Place the order using Backpack SDK (post-only to ensure maker order)
-            order_result = self.account_client.execute_order(
-                symbol=contract_id,
-                side=side,
-                order_type=OrderTypeEnum.LIMIT,
-                quantity=str(quantity),
-                price=str(self.round_to_tick(order_price)),
-                post_only=True,
-                time_in_force=TimeInForceEnum.GTC
-            )
+                if not order_result:
+                    return OrderResult(success=False, error_message='Failed to place order')
 
-            if not order_result:
-                return OrderResult(success=False, error_message='Failed to place order')
+                if 'code' in order_result:
+                    message = order_result.get('message', 'Unknown error')
+                    
+                    # Check for critical errors that should stop retrying
+                    if 'Insufficient margin' in message or 'insufficient' in message.lower():
+                        self.logger.log(f"[OPEN] Critical error - Insufficient margin to open order", "ERROR")
+                        return OrderResult(success=False, error_message=f'Insufficient margin: {message}')
+                    
+                    # For other errors (like post-only rejection), continue retrying
+                    self.logger.log(f"[OPEN] Order rejected: {message}", "WARNING")
+                    continue
 
-            if 'code' in order_result:
-                message = order_result.get('message', 'Unknown error')
-                self.logger.log(f"[OPEN] Order rejected: {message}", "WARNING")
-                continue
+                # Extract order ID from response
+                order_id = order_result.get('id')
+                if not order_id:
+                    self.logger.log(f"[OPEN] No order ID in response: {order_result}", "ERROR")
+                    return OrderResult(success=False, error_message='No order ID in response')
 
-            # Extract order ID from response
-            order_id = order_result.get('id')
-            if not order_id:
-                self.logger.log(f"[OPEN] No order ID in response: {order_result}", "ERROR")
-                return OrderResult(success=False, error_message='No order ID in response')
-
-            # Order successfully placed
-            return OrderResult(
-                success=True,
-                order_id=order_id,
-                side=side.lower(),
-                size=quantity,
-                price=order_price,
-                status='New'
-            )
+                # Order successfully placed
+                return OrderResult(
+                    success=True,
+                    order_id=order_id,
+                    side=side.lower(),
+                    size=quantity,
+                    price=order_price,
+                    status='New'
+                )
+            except Exception as e:
+                self.logger.log(f"[OPEN] Error placing order: {str(e)}", "ERROR")
+                # Return a generic error message instead of the exception string
+                return OrderResult(success=False, error_message="Failed to place open order")
 
         return OrderResult(success=False, error_message='Max retries exceeded')
 
@@ -437,60 +458,72 @@ class BackpackClient(BaseExchangeClient):
 
         while retry_count < max_retries:
             retry_count += 1
-            # Get current market prices to adjust order price if needed
-            best_bid, best_ask = await self.fetch_bbo_prices(contract_id)
+            try:
+                # Get current market prices to adjust order price if needed
+                best_bid, best_ask = await self.fetch_bbo_prices(contract_id)
 
-            if best_bid <= 0 or best_ask <= 0:
-                return OrderResult(success=False, error_message='No bid/ask data available')
+                if best_bid <= 0 or best_ask <= 0:
+                    return OrderResult(success=False, error_message='No bid/ask data available')
 
-            # Adjust order price based on market conditions and side
-            adjusted_price = price
-            if side.lower() == 'sell':
-                order_side = 'Ask'
-                # For sell orders, ensure price is above best bid to be a maker order
-                if price <= best_bid:
-                    adjusted_price = best_bid + self.config.tick_size
-            elif side.lower() == 'buy':
-                order_side = 'Bid'
-                # For buy orders, ensure price is below best ask to be a maker order
-                if price >= best_ask:
-                    adjusted_price = best_ask - self.config.tick_size
+                # Adjust order price based on market conditions and side
+                adjusted_price = price
+                if side.lower() == 'sell':
+                    order_side = 'Ask'
+                    # For sell orders, ensure price is above best bid to be a maker order
+                    if price <= best_bid:
+                        adjusted_price = best_bid + self.config.tick_size
+                elif side.lower() == 'buy':
+                    order_side = 'Bid'
+                    # For buy orders, ensure price is below best ask to be a maker order
+                    if price >= best_ask:
+                        adjusted_price = best_ask - self.config.tick_size
 
-            adjusted_price = self.round_to_tick(adjusted_price)
-            # Place the order using Backpack SDK (post-only to avoid taker fees)
-            order_result = self.account_client.execute_order(
-                symbol=contract_id,
-                side=order_side,
-                order_type=OrderTypeEnum.LIMIT,
-                quantity=str(quantity),
-                price=str(adjusted_price),
-                post_only=True,
-                time_in_force=TimeInForceEnum.GTC
-            )
+                adjusted_price = self.round_to_tick(adjusted_price)
+                # Place the order using Backpack SDK (post-only to avoid taker fees)
+                order_result = self.account_client.execute_order(
+                    symbol=contract_id,
+                    side=order_side,
+                    order_type=OrderTypeEnum.LIMIT,
+                    quantity=str(quantity),
+                    price=str(adjusted_price),
+                    post_only=True,
+                    time_in_force=TimeInForceEnum.GTC
+                )
 
-            if not order_result:
-                return OrderResult(success=False, error_message='Failed to place order')
+                if not order_result:
+                    return OrderResult(success=False, error_message='Failed to place order')
 
-            if 'code' in order_result:
-                message = order_result.get('message', 'Unknown error')
-                self.logger.log(f"[CLOSE] Error placing order: {message}", "ERROR")
-                continue
+                if 'code' in order_result:
+                    message = order_result.get('message', 'Unknown error')
+                    
+                    # Check for critical errors that should stop retrying
+                    if 'Insufficient margin' in message or 'insufficient' in message.lower():
+                        self.logger.log(f"[CLOSE] Critical error - Insufficient margin to place close order", "ERROR")
+                        return OrderResult(success=False, error_message=f'Insufficient margin: {message}')
+                    
+                    # For other errors (like post-only rejection), continue retrying
+                    self.logger.log(f"[CLOSE] Error placing order: {message}", "ERROR")
+                    continue
 
-            # Extract order ID from response
-            order_id = order_result.get('id')
-            if not order_id:
-                self.logger.log(f"[CLOSE] No order ID in response: {order_result}", "ERROR")
-                return OrderResult(success=False, error_message='No order ID in response')
+                # Extract order ID from response
+                order_id = order_result.get('id')
+                if not order_id:
+                    self.logger.log(f"[CLOSE] No order ID in response: {order_result}", "ERROR")
+                    return OrderResult(success=False, error_message='No order ID in response')
 
-            # Order successfully placed
-            return OrderResult(
-                success=True,
-                order_id=order_id,
-                side=side.lower(),
-                size=quantity,
-                price=adjusted_price,
-                status='New'
-            )
+                # Order successfully placed
+                return OrderResult(
+                    success=True,
+                    order_id=order_id,
+                    side=side.lower(),
+                    size=quantity,
+                    price=adjusted_price,
+                    status='New'
+                )
+            except Exception as e:
+                self.logger.log(f"[CLOSE] Error placing order: {str(e)}", "ERROR")
+                # Return a generic error message instead of the exception string
+                return OrderResult(success=False, error_message="Failed to place close order")
 
         return OrderResult(success=False, error_message='Max retries exceeded for close order')
 
@@ -514,7 +547,9 @@ class BackpackClient(BaseExchangeClient):
             return OrderResult(success=True, filled_size=filled_size)
 
         except Exception as e:
-            return OrderResult(success=False, error_message=str(e))
+            self.logger.log(f"[CLOSE] Error canceling order {order_id}: {str(e)}", "ERROR")
+            # Instead of returning str(e) which might contain asyncio errors, return a generic message
+            return OrderResult(success=False, error_message="Failed to cancel order")
 
     @query_retry()
     async def get_order_info(self, order_id: str) -> Optional[OrderInfo]:

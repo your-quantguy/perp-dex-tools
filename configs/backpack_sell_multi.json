@@ -1,0 +1,40 @@
+{
+  "exchange": "backpack",
+  "env_file": ".env",
+  "common_params": {
+    "take_profit": 0.02,
+    "direction": "sell",
+    "max_orders": 10,
+    "wait_time": 450,
+    "grid_step": 0.2,
+    "stop_price": -1,
+    "pause_price": -1,
+    "boost_mode": false
+  },
+  "tickers": [
+    {
+      "ticker": "SOL",
+      "quantity": 0.5,
+      "instance_id": "SOL_sell",
+      "direction": "sell"
+    },
+    {
+      "ticker": "BTC",
+      "quantity": 0.01,
+      "instance_id": "BTC_sell",
+      "direction": "sell"
+    },
+    {
+      "ticker": "ETH",
+      "quantity": 0.1,
+      "instance_id": "ETH_sell",
+      "direction": "sell"
+    },
+    {
+      "ticker": "SUI",
+      "quantity": 1.0,
+      "instance_id": "SUI_sell",
+      "direction": "sell"
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+{
+  "exchange": "backpack",
+  "env_file": ".env",
+  "common_params": {
+    "take_profit": 0.02,
+    "max_orders": 10,
+    "wait_time": 300,
+    "boost_mode": false
+  },
+  "tickers": [
+    {
+      "ticker": "SOL",
+      "quantity": 0.5,
+      "instance_id": "SOL_sell_aggressive",
+      "direction": "sell",
+      "grid_step": 0.15,
+      "max_orders": 15
+    },
+    {
+      "ticker": "BTC",
+      "quantity": 0.01,
+      "instance_id": "BTC_buy_conservative",
+      "direction": "buy",
+      "take_profit": 0.03,
+      "grid_step": 0.3,
+      "max_orders": 8
+    },
+    {
+      "ticker": "ETH",
+      "quantity": 0.1,
+      "instance_id": "ETH_sell_medium",
+      "direction": "sell",
+      "grid_step": 0.2,
+      "max_orders": 12
+    },
+    {
+      "ticker": "SUI",
+      "quantity": 1.0,
+      "instance_id": "SUI_buy_aggressive",
+      "direction": "buy",
+      "grid_step": 0.1,
+      "max_orders": 20,
+      "wait_time": 200
+    }
+  ]
+}
